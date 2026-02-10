@@ -1,58 +1,27 @@
-# Pocket-R Auto-boot + USB Update Pack
+# Pocket-R v7 Boot Splash Fast Pack
 
-Drop this `deploy/` folder into your Pocket-R project (same folder as `app.py`), then run the setup scripts.
+This pack fixes a common ~90s delay where Pocket-R waits on `local-fs.target`.
+If your system is waiting for a missing drive listed in `/etc/fstab`, `local-fs.target`
+can be delayed ~1m30, and Pocket-R won't start until after that.
 
-## 1) Auto-start on boot (no keyboard needed)
+These updated service templates remove `After=local-fs.target` so the splash/game can
+start immediately (as soon as SPI is available), even if some mount is timing out.
+
+## Install
+Copy `deploy/` into your Pocket-R folder (same folder as app.py), overwriting existing deploy files:
 ```bash
+cp -r deploy ~/pocketr_tamagotchi_test/deploy
+cd ~/pocketr_tamagotchi_test
 chmod +x deploy/*.sh
 ./deploy/setup_autoboot.sh
-```
-
-Reboot to test:
-```bash
 sudo reboot
 ```
 
-## 2) Optional: USB "update pack" (plug in a labeled drive to update + restart)
+## Diagnose a 90s delay
 ```bash
-./deploy/setup_usb_update.sh
+chmod +x deploy/diagnose_boot_delay.sh
+./deploy/diagnose_boot_delay.sh
 ```
 
-### USB contents accepted
-Put **one** of these on a USB drive (filesystem label **POCKETR**):
-
-A) `pocketr_update.zip` at USB root  
-B) `app.py` (and other files) at USB root  
-C) `pocketr_tamagotchi_test/` folder at USB root
-
-When you plug it in, it copies into your app folder and restarts `pocketr.service`.
-
-### Label the USB drive "POCKETR"
-- FAT/ext filesystems: label it in whatever tool you use, or from Linux with `e2label` / `fatlabel`.
-- exFAT: install support if needed: `sudo apt install -y exfatprogs`
-
-## 3) Optional: console autologin (removes login prompt)
-```bash
-./deploy/enable_console_autologin.sh
-# or specify another user:
-./deploy/enable_console_autologin.sh pi
-```
-
-Undo:
-```bash
-./deploy/disable_console_autologin.sh
-```
-
-## Uninstall
-```bash
-./deploy/uninstall_autoboot.sh
-```
-
-
-## Shutdown indicator
-This pack also installs a shutdown hook that turns the LCD backlight OFF at the *end* of shutdown/reboot. Use that as the "safe to flip the power switch" indicator.
-
-
-## Boot splash (shows on LCD during boot)
-`setup_autoboot.sh` also installs `pocketr-splash.service`, which runs `splash.py` to show "Booting..." on the LCD.
-Right before `app.py` launches, `pocketr.service` stops the splash automatically.
+If you see a `.mount` unit or local-fs critical chain taking ~1m30, check `/etc/fstab`
+for missing devices (USB drive, SSD, etc.) and add `nofail` and a shorter timeout.

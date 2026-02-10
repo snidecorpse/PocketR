@@ -1,18 +1,18 @@
 [Unit]
-Description=Pocket-R Boot Splash
+Description=Pocket-R Boot Splash (early)
 Wants=dev-spidev0.0.device
-After=dev-spidev0.0.device local-fs.target
-Before=pocketr.service
+After=dev-spidev0.0.device systemd-modules-load.service
+Before=pocketr.service getty@tty1.service
 
 [Service]
 Type=simple
 WorkingDirectory=@@APP_DIR@@
+ExecStartPre=/bin/sh -c 'test -c /dev/spidev0.0 || { echo "Missing /dev/spidev0.0 (enable SPI)"; exit 1; }'
 ExecStart=/usr/bin/python3 @@APP_DIR@@/splash.py
 Restart=always
 RestartSec=0.5
 User=root
 Environment=PYTHONUNBUFFERED=1
-ExecStartPre=/bin/sh -c 'test -c /dev/spidev0.0 || { echo "Missing /dev/spidev0.0 (enable SPI)"; exit 1; }'
 
 [Install]
 WantedBy=multi-user.target
