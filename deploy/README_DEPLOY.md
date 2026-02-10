@@ -51,3 +51,8 @@ Undo:
 
 ## Shutdown indicator
 This pack also installs a shutdown hook that turns the LCD backlight OFF at the *end* of shutdown/reboot. Use that as the "safe to flip the power switch" indicator.
+
+
+## Boot splash (shows on LCD during boot)
+`setup_autoboot.sh` also installs `pocketr-splash.service`, which runs `splash.py` to show "Booting..." on the LCD.
+Right before `app.py` launches, `pocketr.service` stops the splash automatically.

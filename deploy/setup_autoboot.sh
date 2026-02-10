@@ -21,8 +21,20 @@ sudo cp "$TMP_POWEROFF" /etc/systemd/system/pocketr-poweroff-backlight.service
 sudo chmod 0644 /etc/systemd/system/pocketr-poweroff-backlight.service
 sudo systemctl enable pocketr-poweroff-backlight.service
 
+
+echo "[setup] Installing boot splash service: pocketr-splash.service"
+
+TMP_SPLASH="/tmp/pocketr-splash.service.$$"
+sed "s|@@APP_DIR@@|$APP_DIR|g" "$APP_DIR/deploy/pocketr-splash.service.in" > "$TMP_SPLASH"
+
+sudo cp "$TMP_SPLASH" /etc/systemd/system/pocketr-splash.service
+sudo chmod 0644 /etc/systemd/system/pocketr-splash.service
+sudo systemctl enable pocketr-splash.service
+
 sudo systemctl daemon-reload
 sudo systemctl enable pocketr.service
+# Start splash now (it will be stopped automatically when pocketr starts)
+sudo systemctl start pocketr-splash.service || true
 sudo systemctl restart pocketr.service
 
 echo

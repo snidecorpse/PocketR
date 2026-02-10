@@ -1,11 +1,12 @@
 [Unit]
 Description=Pocket-R Tamagotchi (auto-start)
 Wants=dev-spidev0.0.device
-After=dev-spidev0.0.device local-fs.target
+After=dev-spidev0.0.device local-fs.target pocketr-splash.service
 
 [Service]
 Type=simple
 WorkingDirectory=@@APP_DIR@@
+ExecStartPre=-/bin/systemctl stop pocketr-splash.service
 ExecStart=/usr/bin/python3 @@APP_DIR@@/app.py
 Restart=always
 RestartSec=1

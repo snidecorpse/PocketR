@@ -6,6 +6,12 @@ sudo systemctl stop pocketr.service || true
 sudo systemctl disable pocketr.service || true
 sudo rm -f /etc/systemd/system/pocketr.service
 
+
+echo "[uninstall] Stopping/disabling pocketr-splash.service"
+sudo systemctl stop pocketr-splash.service || true
+sudo systemctl disable pocketr-splash.service || true
+sudo rm -f /etc/systemd/system/pocketr-splash.service
+
 echo "[uninstall] Removing USB update hook (if installed)"
 sudo systemctl stop pocketr-usb-update.service 2>/dev/null || true
 sudo rm -f /etc/systemd/system/pocketr-usb-update.service
