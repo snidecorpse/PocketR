@@ -39,6 +39,49 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> Lis
     return lines
 
 
+def fit_ellipsis(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
+    """Clip a single line with an ellipsis so it fits in max_width."""
+    if not text:
+        return ""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    ell = "…"
+    if draw.textlength(ell, font=font) > max_width:
+        return ""
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        cand = text[:mid] + ell
+        if draw.textlength(cand, font=font) <= max_width:
+            lo = mid + 1
+        else:
+            hi = mid
+    return text[: max(0, lo - 1)] + ell
+
+
+def wrap_hard(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> List[str]:
+    """Wrap text even when there are no spaces (e.g., long git output)."""
+    if not text:
+        return [""]
+
+    # Prefer word wrap when possible
+    if " " in text:
+        return wrap_text(draw, text, font, max_width)
+
+    out: List[str] = []
+    cur = ""
+    for ch in text:
+        test = cur + ch
+        if draw.textlength(test, font=font) <= max_width or not cur:
+            cur = test
+        else:
+            out.append(cur)
+            cur = ch
+    if cur:
+        out.append(cur)
+    return out
+
+
 def draw_center_text(img: Image.Image, text: str, font, fill=(255, 255, 255)) -> None:
     d = ImageDraw.Draw(img)
     w, h = img.size
