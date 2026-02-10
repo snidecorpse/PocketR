@@ -16,31 +16,34 @@ Game contract (recommended):
 Engine features kept here:
 - Hardware init (ST7789)
 - Input edge events (joystick + K1/K2/K3)
-- Global hold-to-shutdown (PRESS hold 10s -> systemctl poweroff)
-- Frame pacing
+- Global hold-to-shutdown (K3 hold -> systemctl poweroff)
+- Frame pacing (FPS can be overridden by pocketr_settings.json)
 
 If your game instead exports run(ctx) (custom loop), we'll call that, but then YOU must
 implement hold-to-shutdown in your own loop using ctx.request_poweroff().
 """
+import json
 import os
 import time
 import subprocess
 import traceback
 import importlib
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
 import ST7789
 
-# --------- Hardware / UX settings ---------
+# --------- Hardware / UX defaults ---------
 ROTATE_DEG = 270          # 0 / 90 / 180 / 270
 ACTIVE_HIGH = False       # Typical pull-up buttons: pressed=0
-FPS = 30                  # Lower = less CPU
-BACKLIGHT = 100            # 0-100
-SHUTDOWN_HOLD_SECONDS = 5.0
-CLICK_MAX_SECONDS = 0.7
+
+FPS_DEFAULT = 15          # will be overridden by pocketr_settings.json if present
+BACKLIGHT_DEFAULT = 60    # will be overridden by pocketr_settings.json if present
+
+SHUTDOWN_HOLD_SECONDS = 3.0     # hold K3 to shut down
+PREFS_FILE = "pocketr_settings.json"  # written by game/apps/settings.py
 # -----------------------------------------
 
 
@@ -92,14 +95,14 @@ def show_shutdown_screen(disp, font_title, font_body):
     draw = ImageDraw.Draw(img)
     draw.text((12, 12), "Shutting down...", font=font_title, fill=(255, 255, 255))
 
-    msg = "Wait till GREEN LIGHT TURNS OFF then turn off switch."
+    msg = "Flick OFF the right switch when the screen backlight turns off."
     lines = wrap_text(draw, msg, font_body, max_width=disp.width - 24)
     y = 60
     for line in lines:
         draw.text((12, y), line, font=font_body, fill=(255, 255, 255))
         y += 18
 
-    draw.text((12, disp.height - 26), "Safe to power on again anytime", font=font_body, fill=(200, 200, 200))
+    draw.text((12, disp.height - 26), "Safe to power on again anytime.", font=font_body, fill=(200, 200, 200))
     disp.ShowImage(rotate_if_needed(img))
 
 
@@ -131,7 +134,7 @@ class InputEdge:
             "DOWN": disp.GPIO_KEY_DOWN_PIN,
             "LEFT": disp.GPIO_KEY_LEFT_PIN,
             "RIGHT": disp.GPIO_KEY_RIGHT_PIN,
-            "PRESS": disp.GPIO_KEY_PRESS_PIN,
+            "PRESS": disp.GPIO_KEY_PRESS_PIN,  # joystick center
             "K1": disp.GPIO_KEY1_PIN,
             "K2": disp.GPIO_KEY2_PIN,
             "K3": disp.GPIO_KEY3_PIN,
@@ -191,12 +194,63 @@ def show_error_screen(disp, title: str, body: str, font_title, font_body):
     disp.ShowImage(rotate_if_needed(img))
 
 
+def _prefs_path(base_dir: str) -> str:
+    return os.path.join(base_dir, PREFS_FILE)
+
+
+def _load_prefs(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _read_runtime_settings(base_dir: str) -> Tuple[int, int]:
+    """
+    Returns (brightness, target_fps).
+    Safe defaults when the prefs file doesn't exist.
+    """
+    prefs = _load_prefs(_prefs_path(base_dir))
+
+    # brightness 0..100
+    try:
+        bl = int(clamp(float(prefs.get("brightness", BACKLIGHT_DEFAULT)), 0, 100))
+    except Exception:
+        bl = int(BACKLIGHT_DEFAULT)
+
+    # target_fps 5..60 (engine uses 1/fps sleep)
+    try:
+        fps = int(clamp(float(prefs.get("target_fps", FPS_DEFAULT)), 5, 60))
+    except Exception:
+        fps = int(FPS_DEFAULT)
+
+    return bl, fps
+
+
 def run_engine(game_mod, ctx: Ctx):
     # optional init hook
     if hasattr(game_mod, "init"):
         game_mod.init(ctx)
 
-    press_start: Optional[float] = None
+    # K3 hold tracking (engine-level so it works even if the game crashes)
+    k3_start: Optional[float] = None
+
+    # Runtime settings hot-reload (file mtime)
+    prefs_path = _prefs_path(ctx.base_dir)
+    last_mtime: float = -1.0
+    next_check: float = 0.0
+    backlight = BACKLIGHT_DEFAULT
+    fps_target = FPS_DEFAULT
+
+    # apply initial persisted settings (if present)
+    backlight, fps_target = _read_runtime_settings(ctx.base_dir)
+    try:
+        ctx.disp.bl_DutyCycle(int(backlight))
+    except Exception:
+        pass
+
     t_last = time.time()
 
     while True:
@@ -206,24 +260,45 @@ def run_engine(game_mod, ctx: Ctx):
 
         ev = ctx.inputs.update()
 
-        # global hold-to-shutdown
+        # ---- engine-level hold-to-shutdown: K3 only ----
         if "K3" in ev:
-            press_start = now
-
+            k3_start = now
         if "K3_UP" in ev:
-            press_start = None
+            k3_start = None
 
-        if press_start is not None and ctx.inputs.is_down("K3"):
-            held = now - press_start
+        if k3_start is not None and ctx.inputs.is_down("K3"):
+            held = now - k3_start
             if held >= SHUTDOWN_HOLD_SECONDS:
                 ctx.request_poweroff()
 
-            # expose a little progress info to the game if it wants it
+            # optional: expose progress to the game if it wants it
             ctx.user["shutdown_holding"] = True
             ctx.user["shutdown_hold_seconds"] = held
+            ctx.user["shutdown_hold_total"] = SHUTDOWN_HOLD_SECONDS
+            ctx.user["shutdown_hold_key"] = "K3"
         else:
             ctx.user["shutdown_holding"] = False
             ctx.user["shutdown_hold_seconds"] = 0.0
+            ctx.user["shutdown_hold_total"] = SHUTDOWN_HOLD_SECONDS
+            ctx.user["shutdown_hold_key"] = "K3"
+
+        # ---- hot reload persisted settings (brightness/fps) ----
+        if now >= next_check:
+            next_check = now + 0.5  # check twice per second
+            try:
+                mtime = os.path.getmtime(prefs_path)
+            except Exception:
+                mtime = -1.0
+
+            if mtime != last_mtime:
+                last_mtime = mtime
+                bl, fps = _read_runtime_settings(ctx.base_dir)
+                backlight = bl
+                fps_target = fps
+                try:
+                    ctx.disp.bl_DutyCycle(int(backlight))
+                except Exception:
+                    pass
 
         if hasattr(game_mod, "update"):
             game_mod.update(ctx, dt, ev)
@@ -235,8 +310,9 @@ def run_engine(game_mod, ctx: Ctx):
         if img is not None:
             ctx.show(img)
 
+        # Frame pacing
         frame_time = time.time() - now
-        time.sleep(max(0.0, (1.0 / FPS) - frame_time))
+        time.sleep(max(0.0, (1.0 / max(1, int(fps_target))) - frame_time))
 
 
 def main():
@@ -248,7 +324,13 @@ def main():
     disp = ST7789.ST7789()
     disp.Init()
     disp.clear()
-    disp.bl_DutyCycle(BACKLIGHT)
+
+    # Apply persisted brightness immediately (if available)
+    bl, _fps = _read_runtime_settings(base_dir)
+    try:
+        disp.bl_DutyCycle(int(bl))
+    except Exception:
+        disp.bl_DutyCycle(int(BACKLIGHT_DEFAULT))
 
     # Fonts + input
     font_s = load_font(12)
