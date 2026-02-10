@@ -1,7 +1,0 @@
-[Unit]
-Description=Pocket-R USB update (drive label POCKETR)
-After=local-fs.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash @@APP_DIR@@/deploy/usb_update.sh @@APP_DIR@@

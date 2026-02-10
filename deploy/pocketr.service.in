@@ -5,11 +5,14 @@ After=dev-spidev0.0.device local-fs.target
 
 [Service]
 Type=simple
+# Run as the normal user so it sees the same Python packages that worked when you ran app.py manually.
+User=pi
+Group=pi
+SupplementaryGroups=gpio spi i2c
 WorkingDirectory=@@APP_DIR@@
-ExecStart=/usr/bin/python3 @@APP_DIR@@/app.py
+ExecStart=/usr/bin/python3 -u @@APP_DIR@@/app.py
 Restart=always
 RestartSec=1
-User=root
 Environment=PYTHONUNBUFFERED=1
 # Fail fast if SPI device isn't present (SPI not enabled / wrong overlay)
 ExecStartPre=/bin/sh -c 'test -c /dev/spidev0.0 || { echo "Missing /dev/spidev0.0 (enable SPI via raspi-config)"; exit 1; }'

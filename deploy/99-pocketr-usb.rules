@@ -1,3 +1,0 @@
-# When a USB mass-storage partition with filesystem label "POCKETR" is added,
-# trigger the Pocket-R USB update oneshot service.
-ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="POCKETR", TAG+="systemd", ENV{SYSTEMD_WANTS}+="pocketr-usb-update.service"

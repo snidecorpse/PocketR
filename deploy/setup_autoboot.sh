@@ -18,6 +18,7 @@ sudo systemctl restart pocketr.service
 
 echo
 echo "✅ Auto-boot enabled."
-echo "Useful commands:"
+echo "Check:"
 echo "  systemctl status pocketr.service --no-pager"
-echo "  journalctl -u pocketr.service -n 200 --no-pager"
+echo "Logs:"
+echo "  journalctl -u pocketr.service -b -n 200 --no-pager"
