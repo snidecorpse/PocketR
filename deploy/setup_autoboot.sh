@@ -12,6 +12,15 @@ sed "s|@@APP_DIR@@|$APP_DIR|g" "$APP_DIR/deploy/pocketr.service.in" > "$TMP_SERV
 sudo cp "$TMP_SERVICE" /etc/systemd/system/pocketr.service
 sudo chmod 0644 /etc/systemd/system/pocketr.service
 
+echo "[setup] Installing shutdown backlight hook: pocketr-poweroff-backlight.service"
+
+TMP_POWEROFF="/tmp/pocketr-poweroff-backlight.service.$$"
+sed "s|@@APP_DIR@@|$APP_DIR|g" "$APP_DIR/deploy/pocketr-poweroff-backlight.service.in" > "$TMP_POWEROFF"
+
+sudo cp "$TMP_POWEROFF" /etc/systemd/system/pocketr-poweroff-backlight.service
+sudo chmod 0644 /etc/systemd/system/pocketr-poweroff-backlight.service
+sudo systemctl enable pocketr-poweroff-backlight.service
+
 sudo systemctl daemon-reload
 sudo systemctl enable pocketr.service
 sudo systemctl restart pocketr.service

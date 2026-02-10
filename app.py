@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Pocket-R Tamagotchi Test (v4)
+Pocket-R Tamagotchi Test (v5)
 - Uses Waveshare ST7789 (240x240) demo driver (ST7789.py + config.py)
 - Joystick changes rooms
 - KEY1/KEY2/KEY3 do Feed / Play / Clean
@@ -250,15 +250,12 @@ def show_shutdown_screen(disp, font_title, font_body):
 
 
 def request_poweroff(disp, font_title, font_body):
-    # Show instructions first
+    """
+    Start a real Linux shutdown, but keep the backlight ON so the user keeps seeing
+    the shutdown instructions. A separate systemd shutdown hook will turn the
+    backlight OFF at the *end* of shutdown to signal it is safe to flip the power switch.
+    """
     show_shutdown_screen(disp, font_title, font_body)
-    time.sleep(0.8)
-
-    # Turn off backlight to signal user
-    try:
-        disp.bl_DutyCycle(0)
-    except Exception:
-        pass
 
     # Flush writes
     try:
@@ -266,14 +263,15 @@ def request_poweroff(disp, font_title, font_body):
     except Exception:
         pass
 
-    # Initiate shutdown (service runs as root, so no password)
+    # Initiate shutdown (pocketr.service runs as root, so no password)
     try:
         subprocess.Popen(["/usr/bin/systemctl", "poweroff"])
     except Exception:
         subprocess.Popen(["/sbin/shutdown", "-h", "now"])
 
-    # Exit immediately without clearing display/backlight
-    os._exit(0)
+    # Keep the screen up until systemd stops us
+    while True:
+        time.sleep(1)
 
 
 def main():

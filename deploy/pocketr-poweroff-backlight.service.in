@@ -1,0 +1,11 @@
+[Unit]
+Description=Pocket-R backlight off at shutdown (safe power indicator)
+DefaultDependencies=no
+Before=halt.target reboot.target poweroff.target shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @@APP_DIR@@/deploy/poweroff_backlight.py
+
+[Install]
+WantedBy=halt.target reboot.target poweroff.target

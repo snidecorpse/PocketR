@@ -47,3 +47,7 @@ Undo:
 ```bash
 ./deploy/uninstall_autoboot.sh
 ```
+
+
+## Shutdown indicator
+This pack also installs a shutdown hook that turns the LCD backlight OFF at the *end* of shutdown/reboot. Use that as the "safe to flip the power switch" indicator.
