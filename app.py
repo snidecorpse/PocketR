@@ -37,9 +37,9 @@ import ST7789
 # --------- Hardware / UX settings ---------
 ROTATE_DEG = 270          # 0 / 90 / 180 / 270
 ACTIVE_HIGH = False       # Typical pull-up buttons: pressed=0
-FPS = 15                  # Lower = less CPU
-BACKLIGHT = 60            # 0-100
-SHUTDOWN_HOLD_SECONDS = 10.0
+FPS = 30                  # Lower = less CPU
+BACKLIGHT = 100            # 0-100
+SHUTDOWN_HOLD_SECONDS = 5.0
 CLICK_MAX_SECONDS = 0.7
 # -----------------------------------------
 
@@ -92,14 +92,14 @@ def show_shutdown_screen(disp, font_title, font_body):
     draw = ImageDraw.Draw(img)
     draw.text((12, 12), "Shutting down...", font=font_title, fill=(255, 255, 255))
 
-    msg = "Flick OFF the right switch when the screen backlight turns off."
+    msg = "Wait till GREEN LIGHT TURNS OFF then turn off switch."
     lines = wrap_text(draw, msg, font_body, max_width=disp.width - 24)
     y = 60
     for line in lines:
         draw.text((12, y), line, font=font_body, fill=(255, 255, 255))
         y += 18
 
-    draw.text((12, disp.height - 26), "Safe to power on again anytime.", font=font_body, fill=(200, 200, 200))
+    draw.text((12, disp.height - 26), "Safe to power on again anytime", font=font_body, fill=(200, 200, 200))
     disp.ShowImage(rotate_if_needed(img))
 
 
@@ -207,13 +207,13 @@ def run_engine(game_mod, ctx: Ctx):
         ev = ctx.inputs.update()
 
         # global hold-to-shutdown
-        if "PRESS" in ev:
+        if "K3" in ev:
             press_start = now
 
-        if "PRESS_UP" in ev:
+        if "K3_UP" in ev:
             press_start = None
 
-        if press_start is not None and ctx.inputs.is_down("PRESS"):
+        if press_start is not None and ctx.inputs.is_down("K3"):
             held = now - press_start
             if held >= SHUTDOWN_HOLD_SECONDS:
                 ctx.request_poweroff()
