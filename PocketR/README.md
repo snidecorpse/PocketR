@@ -1,85 +1,69 @@
-# Pocket‑R Tamagotchi Test (Pi + Waveshare 1.3" LCD HAT)
+# Pocket‑R Tamagotchi Test (v4) — Auto‑boot + Safe Shutdown
 
-This is a **simple “v3-ish” tamagotchi test** that runs on the **Waveshare 1.3inch LCD HAT (ST7789, 240×240)** using the same style of demo driver you already ran (`ST7789.py` + `config.py`).
+Runs on the **Waveshare 1.3inch LCD HAT (ST7789, 240×240)** using the demo-style driver (`ST7789.py` + `config.py`).
+
+## What’s new in v4
+- **Auto‑boot** support (systemd service) so it starts on power‑on with **no keyboard**
+- **Safe shutdown**: **hold joystick center for 10 seconds**
+  - Shows an on‑screen message
+  - Turns **backlight off**
+  - Powers off Linux cleanly
 
 ## Controls
-
 - **Joystick**:
   - **Up** → GAME
   - **Down** → LIVING
   - **Left** → BED
   - **Right** → BATH
-  - **Press** → shows a random message bubble
+  - **Center short‑press** → random “message bubble”
+  - **Center HOLD 10s** → shutdown
 - **Buttons**:
   - **KEY1** → FEED
   - **KEY2** → PLAY
   - **KEY3** → CLEAN
 
-## What you’ll see
-- Top HUD with 4 stats (HUN/HAP/HYG/ENE)
-- A tiny pixel pet that “walks”
-- Room changes + an action/message bubble
-
 ---
 
-## 0) One-time setup (SPI + deps)
-
-### Enable SPI
+## Install & Run (manual)
 ```bash
-sudo raspi-config
-# Interfacing Options -> SPI -> Yes
+chmod +x install.sh run.sh
+./install.sh
+./run.sh
+```
+
+## Enable auto‑boot (recommended for handheld)
+```bash
+chmod +x deploy/*.sh
+./deploy/setup_autoboot.sh
 sudo reboot
 ```
 
-### Install dependencies
-From inside this project folder:
+After reboot: the game starts automatically.
+
+### Disable auto‑boot (undo)
 ```bash
-chmod +x install.sh run.sh
-./install.sh
+sudo systemctl disable --now pocketr.service
 ```
-
-> Waveshare also recommends enabling GPIO pull-ups for the buttons. If your inputs act weird, add this to `/boot/config.txt` and reboot:
->
-> `gpio=6,19,5,26,13,21,20,16=pu`
-
-(Those BCM pins match the Waveshare button/joystick pin map.)  
+Or fully remove:
+```bash
+./deploy/uninstall_autoboot.sh
+```
 
 ---
 
-## 1) Run it
-```bash
-./run.sh
-```
-
-If the image is sideways, open `app.py` and change:
-- `ROTATE_DEG = 270` → try `0`, `90`, `180`, or `270`
-
-If buttons feel inverted, toggle:
-- `ACTIVE_HIGH = False` → `True`
+## Safe shutdown (end‑user flow)
+1) **Hold joystick center for 10 seconds**  
+2) Screen shows shutdown instructions  
+3) When the **backlight turns off**, flick **OFF** your power switch  
+4) To turn back on, flick **ON** — it will boot and auto‑start
 
 ---
 
-## 2) How to download this zip on the Pi (once you host it)
-
-Example (replace URL with wherever you host the zip):
-```bash
-wget -O pocketr.zip "https://your-hosting-site/pocketr_tamagotchi_test.zip"
-unzip pocketr.zip
-cd pocketr_tamagotchi_test
-chmod +x install.sh run.sh
-./install.sh
-./run.sh
-```
-
-Good free hosting options:
-- GitHub repo + “Releases” (direct zip download link)
-- Google Drive (make file public) / Dropbox shared link (direct download)
-- Any simple web server
-
----
-
-## Files
-- `app.py` — the tamagotchi test
-- `ST7789.py` + `config.py` — LCD + input driver (Waveshare-style)
-- `install.sh` — installs deps
-- `run.sh` — runs with sudo
+## Notes
+- Auto‑boot works without logging in. Your Linux password still exists (good for maintenance), but you don’t need it for normal use.
+- If SPI isn’t enabled, enable it once with:
+  ```bash
+  sudo raspi-config
+  # Interfacing Options -> SPI -> Yes
+  sudo reboot
+  ```

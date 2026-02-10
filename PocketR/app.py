@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Pocket-R Tamagotchi Test (v3-ish, simple)
+Pocket-R Tamagotchi Test (v4)
 - Uses Waveshare ST7789 (240x240) demo driver (ST7789.py + config.py)
 - Joystick changes rooms
 - KEY1/KEY2/KEY3 do Feed / Play / Clean
+- Joystick center:
+    * short press -> random message
+    * HOLD 10 seconds -> show shutdown instructions, turn off backlight, power off Linux
 """
+import os
 import time
 import random
+import subprocess
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -20,6 +25,8 @@ ROTATE_DEG = 270          # 0 / 90 / 180 / 270. Demo 'main.py' used 270.
 ACTIVE_HIGH = False       # If True: pressed reads 1. If False: pressed reads 0 (typical pull-up).
 FPS = 15                  # Lower = less CPU.
 BACKLIGHT = 60            # 0-100
+SHUTDOWN_HOLD_SECONDS = 10.0
+CLICK_MAX_SECONDS = 0.7   # PRESS shorter than this is treated as a click/message
 # -------------------------------------------
 
 
@@ -37,7 +44,7 @@ def clamp(v, lo=0, hi=100):
 
 
 def load_font(size: int):
-    # Try a common system font; fall back to default.
+    # Try common system fonts; fall back to default.
     for path in [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
@@ -52,6 +59,12 @@ def load_font(size: int):
 def pressed(raw: int) -> bool:
     # Buttons are usually wired as pull-up: released=1, pressed=0
     return (raw != 0) if ACTIVE_HIGH else (raw == 0)
+
+
+def rotate_if_needed(img: Image.Image) -> Image.Image:
+    if ROTATE_DEG in (90, 180, 270):
+        return img.rotate(ROTATE_DEG, expand=False)
+    return img
 
 
 @dataclass
@@ -70,6 +83,7 @@ class Pet:
         self.hunger = clamp(self.hunger - 2.2 * dt)
         self.hygiene = clamp(self.hygiene - 1.2 * dt)
         self.energy = clamp(self.energy - 1.6 * dt)
+
         # happiness depends on others
         stress = (100 - self.hunger) * 0.25 + (100 - self.hygiene) * 0.25 + (100 - self.energy) * 0.25
         self.happy = clamp(self.happy - 0.4 * dt - 0.01 * stress * dt)
@@ -104,6 +118,11 @@ class Pet:
 
 
 class InputEdge:
+    """
+    Tracks pressed state for each input and returns edge events:
+      - "UP" / "DOWN" / ... when the input is pressed (down-edge)
+      - "UP_UP" / "PRESS_UP" / ... when the input is released (up-edge)
+    """
     def __init__(self, disp):
         self.disp = disp
         self.state: Dict[str, bool] = {}
@@ -119,29 +138,32 @@ class InputEdge:
             "K3": disp.GPIO_KEY3_PIN,
         }
 
+    def is_down(self, name: str) -> bool:
+        return bool(self.state.get(name, False))
+
     def update(self) -> Dict[str, bool]:
-        events = {}
+        events: Dict[str, bool] = {}
         for name, pin in self.map.items():
             raw = self.disp.digital_read(pin)
             p = pressed(raw)
             prev = self.state.get(name, False)
             self.state[name] = p
+
             if (not prev) and p:
-                events[name] = True
+                events[name] = True              # pressed
+            elif prev and (not p):
+                events[f"{name}_UP"] = True      # released
         return events
 
 
 def draw_bar(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, val: float, label: str, font):
-    # outline
     draw.rounded_rectangle((x, y, x + w, y + h), radius=3, outline=(220, 220, 220), width=1)
-    # fill
     fill_w = int((w - 2) * (val / 100.0))
     draw.rounded_rectangle((x + 1, y + 1, x + 1 + fill_w, y + h - 1), radius=2, fill=(255, 255, 255))
     draw.text((x, y - 10), f"{label}", font=font, fill=(255, 255, 255))
 
 
 def make_pet_sprite(frame: int, mood: str) -> Image.Image:
-    # 16x16 pixel sprite, resized with NEAREST later
     im = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
 
@@ -151,14 +173,10 @@ def make_pet_sprite(frame: int, mood: str) -> Image.Image:
     elif mood == "HAPPY":
         body = (220, 255, 220, 255)
 
-    # body blob
     d.rounded_rectangle((3, 4, 12, 13), radius=4, fill=body, outline=(0, 0, 0, 255), width=1)
-
-    # eyes
     d.point((6, 7), fill=(0, 0, 0, 255))
     d.point((9, 7), fill=(0, 0, 0, 255))
 
-    # mouth
     if mood == "SAD":
         d.line((6, 10, 9, 10), fill=(0, 0, 0, 255), width=1)
         d.point((5, 11), fill=(0, 0, 0, 255))
@@ -168,7 +186,6 @@ def make_pet_sprite(frame: int, mood: str) -> Image.Image:
     else:
         d.line((7, 10, 8, 10), fill=(0, 0, 0, 255), width=1)
 
-    # legs (two-frame walk)
     if frame % 2 == 0:
         d.rectangle((5, 13, 6, 14), fill=(0, 0, 0, 255))
         d.rectangle((9, 13, 10, 14), fill=(0, 0, 0, 255))
@@ -182,27 +199,81 @@ def make_pet_sprite(frame: int, mood: str) -> Image.Image:
 def room_icon(draw: ImageDraw.ImageDraw, room: str, x: int, y: int):
     c = (255, 255, 255)
     if room == "BED":
-        # Zzz
         draw.text((x, y), "Zz", fill=c)
     elif room == "BATH":
-        # droplet
-        draw.ellipse((x, y, x+10, y+10), outline=c, width=2)
-        draw.polygon([(x+5, y-3), (x+9, y+4), (x+1, y+4)], outline=c, fill=None)
+        draw.ellipse((x, y, x + 10, y + 10), outline=c, width=2)
+        draw.polygon([(x + 5, y - 3), (x + 9, y + 4), (x + 1, y + 4)], outline=c, fill=None)
     elif room == "LIVING":
-        # heart
-        draw.polygon([(x+5, y+10), (x, y+5), (x+2, y), (x+5, y+3), (x+8, y), (x+10, y+5)], outline=c, fill=None)
+        draw.polygon([(x + 5, y + 10), (x, y + 5), (x + 2, y), (x + 5, y + 3), (x + 8, y), (x + 10, y + 5)],
+                     outline=c, fill=None)
     elif room == "GAME":
-        # controller-ish
-        draw.rounded_rectangle((x, y+3, x+12, y+10), radius=3, outline=c, width=2)
-        draw.line((x+3, y+6, x+5, y+6), fill=c, width=2)
-        draw.line((x+4, y+5, x+4, y+7), fill=c, width=2)
-        draw.point((x+9, y+6), fill=c)
+        draw.rounded_rectangle((x, y + 3, x + 12, y + 10), radius=3, outline=c, width=2)
+        draw.line((x + 3, y + 6, x + 5, y + 6), fill=c, width=2)
+        draw.line((x + 4, y + 5, x + 4, y + 7), fill=c, width=2)
+        draw.point((x + 9, y + 6), fill=c)
 
 
-def rotate_if_needed(img: Image.Image) -> Image.Image:
-    if ROTATE_DEG in (90, 180, 270):
-        return img.rotate(ROTATE_DEG, expand=False)
-    return img
+def wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int):
+    words = text.split()
+    lines = []
+    cur = ""
+    for w in words:
+        test = (cur + " " + w).strip()
+        if draw.textlength(test, font=font) <= max_width:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def show_shutdown_screen(disp, font_title, font_body):
+    img = Image.new("RGB", (disp.width, disp.height), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    draw.text((12, 12), "Shutting down...", font=font_title, fill=(255, 255, 255))
+
+    msg = "Flick OFF the right switch when the screen backlight turns off."
+    lines = wrap_text(draw, msg, font_body, max_width=disp.width - 24)
+
+    y = 60
+    for line in lines:
+        draw.text((12, y), line, font=font_body, fill=(255, 255, 255))
+        y += 18
+
+    draw.text((12, disp.height - 26), "Safe to power on again anytime.", font=font_body, fill=(200, 200, 200))
+
+    disp.ShowImage(rotate_if_needed(img))
+
+
+def request_poweroff(disp, font_title, font_body):
+    # Show instructions first
+    show_shutdown_screen(disp, font_title, font_body)
+    time.sleep(0.8)
+
+    # Turn off backlight to signal user
+    try:
+        disp.bl_DutyCycle(0)
+    except Exception:
+        pass
+
+    # Flush writes
+    try:
+        os.sync()
+    except Exception:
+        pass
+
+    # Initiate shutdown (service runs as root, so no password)
+    try:
+        subprocess.Popen(["/usr/bin/systemctl", "poweroff"])
+    except Exception:
+        subprocess.Popen(["/sbin/shutdown", "-h", "now"])
+
+    # Exit immediately without clearing display/backlight
+    os._exit(0)
 
 
 def main():
@@ -213,20 +284,13 @@ def main():
 
     inputs = InputEdge(disp)
     pet = Pet()
-    room_i = 2  # start in LIVING
-    room = ROOMS[room_i]
+    room = "LIVING"
 
-    # rendering assets
+    # Fonts
     font_s = load_font(12)
     font_m = load_font(16)
     font_l = load_font(22)
 
-    # animation
-    frame = 0
-    t_last = time.time()
-    t_accum = 0.0
-
-    # message pool
     msgs = [
         "hi :)",
         "miss u",
@@ -236,18 +300,22 @@ def main():
         "take a breath",
     ]
 
+    press_start: Optional[float] = None
+
     try:
+        t_last = time.time()
+        frame = 0
+
         while True:
             now = time.time()
-            dt = now - t_last
+            dt = max(0.0, min(now - t_last, 0.2))
             t_last = now
-            dt = max(0.0, min(dt, 0.2))
 
-            # sim tick
             pet.tick(dt)
 
-            # inputs (edge events)
             ev = inputs.update()
+
+            # Rooms on d-pad press
             if "UP" in ev:
                 room = "GAME"
             elif "DOWN" in ev:
@@ -256,10 +324,27 @@ def main():
                 room = "BED"
             elif "RIGHT" in ev:
                 room = "BATH"
-            elif "PRESS" in ev:
-                # quick random message
-                pet.action(random.choice(msgs))
 
+            # Joystick center: click vs hold
+            if "PRESS" in ev:
+                press_start = now
+
+            if "PRESS_UP" in ev:
+                if press_start is not None:
+                    held = now - press_start
+                    if held <= CLICK_MAX_SECONDS:
+                        pet.action(random.choice(msgs))
+                press_start = None
+
+            held_seconds = 0.0
+            holding = False
+            if press_start is not None and inputs.is_down("PRESS"):
+                holding = True
+                held_seconds = now - press_start
+                if held_seconds >= SHUTDOWN_HOLD_SECONDS:
+                    request_poweroff(disp, font_l, font_m)
+
+            # Actions
             if "K1" in ev:
                 pet.action("FEED")
             if "K2" in ev:
@@ -267,7 +352,7 @@ def main():
             if "K3" in ev:
                 pet.action("CLEAN")
 
-            # draw frame
+            # --- draw frame ---
             img = Image.new("RGB", (disp.width, disp.height), ROOM_BG[room])
             draw = ImageDraw.Draw(img)
 
@@ -276,28 +361,26 @@ def main():
             draw.text((8, 6), f"ROOM: {room}", font=font_m, fill=(255, 255, 255))
             room_icon(draw, room, 190, 6)
 
-            draw_bar(draw, 8, 30, 52, 10, pet.hunger, "HUN", font_s)
-            draw_bar(draw, 66, 30, 52, 10, pet.happy, "HAP", font_s)
-            draw_bar(draw, 124, 30, 52, 10, pet.hygiene, "HYG", font_s)
-            draw_bar(draw, 182, 30, 52, 10, pet.energy, "ENE", font_s)
+            draw_bar(draw, 8, 30, 52, 10, pet.hunger, "HUN", font=font_s)
+            draw_bar(draw, 66, 30, 52, 10, pet.happy, "HAP", font=font_s)
+            draw_bar(draw, 124, 30, 52, 10, pet.hygiene, "HYG", font=font_s)
+            draw_bar(draw, 182, 30, 52, 10, pet.energy, "ENE", font=font_s)
 
             # pet sprite
             frame = (frame + 1) % 1000000
             sprite = make_pet_sprite(frame // 6, pet.mood).resize((72, 72), Image.NEAREST)
 
-            # place pet in slightly different spot depending room
             pos = {
                 "LIVING": (84, 98),
                 "BED": (40, 120),
                 "BATH": (140, 120),
                 "GAME": (84, 120),
             }[room]
-
             img.paste(sprite, pos, sprite)
 
-            # room label / hint
+            # hint line
             hint = {
-                "LIVING": "PRESS: message",
+                "LIVING": "PRESS: message   (hold 10s = off)",
                 "BED": "rest vibes",
                 "BATH": "stay clean",
                 "GAME": "play time",
@@ -306,27 +389,38 @@ def main():
 
             # action bubble
             if now < pet.last_action_until:
-                bubble_w = 150
-                bubble_h = 30
+                bubble_w, bubble_h = 150, 30
                 bx = (disp.width - bubble_w) // 2
                 by = 70
-                draw.rounded_rectangle((bx, by, bx + bubble_w, by + bubble_h), radius=10, fill=(0, 0, 0), outline=(255, 255, 255), width=2)
+                draw.rounded_rectangle((bx, by, bx + bubble_w, by + bubble_h), radius=10,
+                                       fill=(0, 0, 0), outline=(255, 255, 255), width=2)
                 draw.text((bx + 10, by + 7), pet.last_action, font=font_m, fill=(255, 255, 255))
+
+            # HOLD overlay
+            if holding:
+                remain = max(0.0, SHUTDOWN_HOLD_SECONDS - held_seconds)
+                msg = f"HOLDING... OFF IN {remain:0.0f}"
+                w = int(draw.textlength(msg, font=font_m)) + 20
+                h = 34
+                x = (disp.width - w) // 2
+                y = disp.height - 70
+                draw.rounded_rectangle((x, y, x + w, y + h), radius=10, fill=(0, 0, 0),
+                                       outline=(255, 255, 255), width=2)
+                draw.text((x + 10, y + 8), msg, font=font_m, fill=(255, 255, 255))
 
             # bottom legend
             draw.rectangle((0, disp.height - 26, disp.width, disp.height), fill=(0, 0, 0))
             draw.text((8, disp.height - 20), "K1 FEED   K2 PLAY   K3 CLEAN", font=font_s, fill=(255, 255, 255))
 
-            # push to LCD (rotation)
             disp.ShowImage(rotate_if_needed(img))
 
             # pace
-            time.sleep(max(0.0, (1.0 / FPS) - (time.time() - now)))
+            frame_time = time.time() - now
+            time.sleep(max(0.0, (1.0 / FPS) - frame_time))
 
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        # show error on display for quick debugging
         try:
             img = Image.new("RGB", (disp.width, disp.height), (0, 0, 0))
             draw = ImageDraw.Draw(img)
