@@ -1,20 +1,21 @@
-# Game folder update: Main OS (Intro + Home)
+# GAME folder update (OS shell)
 
-This update contains the Pocket-R **Main OS** layer:
+Changes included in this update:
 
-- Intro splash image: `assets/ui/intro.png` (replace with your own)
-- Home screen: 2x2 icon grid, D-pad navigation, PRESS to open
-- **Hold K3** to shutdown (3 seconds). This is implemented inside `game/main.py`.
+- Intro splash stays longer (~3.5s) before going to the home screen.
+- Home screen: 2x2 icon grid with the earlier panel sizing (no bottom instruction bar).
+- Controls:
+  - D-pad: move selection
+  - **K1: confirm / open**
+  - **K2: back** (inside menus)
+  - **Hold K3: shutdown** (~3s)
 
-## Note about shutdown
-Your launcher `app.py` still shuts down on **PRESS** (center) hold at the engine level.
-If you want shutdown to be **K3 only**, you must change the launcher to watch K3
-instead of PRESS.
+Menus:
+1. Menu 1 (top-left): Game (placeholder room navigation)
+2. Menu 2 (top-right): Blank (reserved)
+3. Menu 3 (bottom-left): Settings/Debug info
+4. Menu 4 (bottom-right): Update (runs `git pull` via `game/scripts/update_repo.sh`, then reboots)
 
-Minimal change needed in `app.py`:
-- In `run_engine(...)`, replace the `"PRESS"` / `"PRESS_UP"` hold-tracking with `"K3"` / `"K3_UP"`
-- Set `SHUTDOWN_HOLD_SECONDS` to your desired value (e.g. 3.0)
-
-This game update works even if you don't change `app.py`, but then BOTH will work:
-- PRESS hold -> shutdown (engine)
-- K3 hold -> shutdown (game)
+## Note about center-press shutdown
+Your `app.py` still has a global **PRESS-hold 10s** shutdown in the engine loop.
+If you want *only* K3 to shutdown, change that block in `app.py` to watch K3 instead of PRESS.
