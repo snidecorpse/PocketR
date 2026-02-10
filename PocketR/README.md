@@ -1,4 +1,4 @@
-# Pocket‑R Tamagotchi Test (v4) — Auto‑boot + Safe Shutdown
+# Pocket‑R (v4) — Auto‑boot + Safe Shutdown
 
 Runs on the **Waveshare 1.3inch LCD HAT (ST7789, 240×240)** using the demo-style driver (`ST7789.py` + `config.py`).
 
