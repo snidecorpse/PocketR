@@ -7,7 +7,14 @@ from typing import Dict, Optional
 
 from PIL import Image, ImageDraw
 
-from .ui_common import load_image_or_blank, overlay_hold_progress
+from .ui_common import (
+    breathe,
+    dots,
+    ease_in_out,
+    fade_from_black,
+    load_image_or_blank,
+    overlay_hold_progress,
+)
 
 
 # --- OS modes ---
@@ -16,8 +23,9 @@ MODE_HOME = "HOME"
 MODE_APP = "APP"
 
 # --- Tunables ---
-INTRO_SECONDS = 3.5      # longer splash per your request
-K3_SHUTDOWN_HOLD = 3.0   # seconds to hold K3 to power off
+INTRO_SECONDS = 6.0       # longer splash
+INTRO_FADE_SECONDS = 1.0  # fade-in duration
+K3_SHUTDOWN_HOLD = 3.0    # seconds to hold K3 to power off
 
 
 @dataclass
@@ -40,18 +48,16 @@ def _size(ctx):
 
 
 def _layout(w: int, h: int):
-    """Match the earlier panel sizing (no top/bottom bars)."""
+    """Square-screen 2x2 layout. No bars on HOME."""
     pad = max(12, w // 20)
     cell = (w - pad * 3) // 2
-    icon = max(24, cell - 6)  # previous version was 96 inside a 102 cell
-    # If not perfectly square, center vertically
+    icon = max(24, cell - 6)
     grid_h = pad * 3 + cell * 2
     top = max(0, (h - grid_h) // 2)
     return pad, cell, icon, top
 
 
 def _load_assets(ctx):
-    # Cache assets once per boot (and per display size)
     w, h = _size(ctx)
     key = f"{w}x{h}"
     if ctx.user.get("_assets_key") == key:
@@ -60,7 +66,6 @@ def _load_assets(ctx):
     intro = load_image_or_blank(ctx.asset("ui", "intro.png"), (w, h), (0, 0, 0))
 
     pad, cell, icon_sz, _top = _layout(w, h)
-
     icons: Dict[int, Image.Image] = {}
     for i in range(4):
         p = ctx.asset("ui", f"icon_{i+1}.png")
@@ -72,14 +77,19 @@ def _load_assets(ctx):
 
 def init(ctx):
     _load_assets(ctx)
+
     ctx.user.setdefault("os_mode", MODE_INTRO)
     ctx.user.setdefault("os_selected", 0)
     ctx.user.setdefault("os_active_app", None)
+
     ctx.user["_intro_t0"] = time.time()
 
     # K3 hold tracking
     ctx.user["_k3_hold_t0"] = None
     ctx.user["_k3_held"] = 0.0
+
+    # FPS smoothing (for optional overlay in apps)
+    ctx.user.setdefault("_fps_smooth", 0.0)
 
 
 def _update_k3_hold(ctx, now: float, ev: Dict[str, bool]):
@@ -107,23 +117,16 @@ def _get_app_module(idx: int):
     return importlib.import_module(mod_name)
 
 
-def _ensure_app_inited(ctx, idx: int):
-    init_key = f"_app_inited_{idx}"
-    if ctx.user.get(init_key):
-        return
-    mod = _get_app_module(idx)
-    if mod and hasattr(mod, "init"):
-        try:
-            mod.init(ctx)
-        except Exception:
-            # app init failures should not crash the whole OS
-            pass
-    ctx.user[init_key] = True
-
 
 def update(ctx, dt: float, ev: Dict[str, bool]):
     _load_assets(ctx)
     now = time.time()
+
+    # FPS smoothing (used by Settings UI if enabled)
+    if dt > 0:
+        inst = 1.0 / dt
+        prev = float(ctx.user.get("_fps_smooth", 0.0))
+        ctx.user["_fps_smooth"] = (prev * 0.90) + (inst * 0.10) if prev > 0 else inst
 
     # global K3 hold-to-shutdown
     _update_k3_hold(ctx, now, ev)
@@ -135,7 +138,7 @@ def update(ctx, dt: float, ev: Dict[str, bool]):
         if (now - float(ctx.user.get("_intro_t0", now))) >= INTRO_SECONDS:
             ctx.user["os_mode"] = MODE_HOME
             return
-        # any input skips intro (K1/K2/dpad/press)
+        # any input skips intro
         if ev:
             ctx.user["os_mode"] = MODE_HOME
         return
@@ -156,12 +159,18 @@ def update(ctx, dt: float, ev: Dict[str, bool]):
 
         ctx.user["os_selected"] = r * 2 + c
 
-        # K1 = confirm/open (PER YOUR REQUEST)
-        if "K1" in ev:
+        # K1 OR joystick PRESS = confirm/open
+        if "K1" in ev or "PRESS" in ev:
             idx = int(ctx.user["os_selected"])
             ctx.user["os_active_app"] = idx
             ctx.user["os_mode"] = MODE_APP
-            _ensure_app_inited(ctx, idx)
+            # init app on every entry (idempotent)
+            mod = _get_app_module(idx)
+            if mod is not None and hasattr(mod, "init"):
+                try:
+                    mod.init(ctx)
+                except Exception:
+                    pass
         return
 
     # APP
@@ -178,7 +187,6 @@ def update(ctx, dt: float, ev: Dict[str, bool]):
             ctx.user["os_active_app"] = None
             return
 
-        # Let the app decide back behavior; convention: update() returns True to go back
         if hasattr(mod, "update"):
             try:
                 wants_back = bool(mod.update(ctx, dt, ev))
@@ -188,7 +196,6 @@ def update(ctx, dt: float, ev: Dict[str, bool]):
                 ctx.user["os_mode"] = MODE_HOME
                 ctx.user["os_active_app"] = None
         else:
-            # no update() => allow K2 to back
             if "K2" in ev:
                 ctx.user["os_mode"] = MODE_HOME
                 ctx.user["os_active_app"] = None
@@ -204,7 +211,25 @@ def render(ctx) -> Image.Image:
 
     # INTRO
     if mode == MODE_INTRO:
-        img = assets.intro.copy().convert("RGB")
+        t = time.time() - float(ctx.user.get("_intro_t0", time.time()))
+
+        # Fade-in for the first second
+        fade = ease_in_out(min(1.0, t / max(0.001, INTRO_FADE_SECONDS)))
+        img = fade_from_black(assets.intro, fade).convert("RGB")
+
+        # Subtle "breathe" vignette + loading dots
+        d = ImageDraw.Draw(img)
+        pulse = 0.08 + 0.12 * breathe(t, 2.2)
+        # darken corners slightly
+        if pulse > 0:
+            overlay = Image.new("RGBA", (w, h), (0, 0, 0, int(255 * pulse)))
+            img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+            d = ImageDraw.Draw(img)
+
+        msg = "Starting" + dots(t)
+        tw = int(d.textlength(msg, font=ctx.font_m))
+        d.text(((w - tw) // 2, h - 34), msg, font=ctx.font_m, fill=(230, 230, 230))
+
         held = float(ctx.user.get("_k3_held", 0.0))
         if held > 0:
             img = overlay_hold_progress(img, "Hold K3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
@@ -223,10 +248,8 @@ def render(ctx) -> Image.Image:
             x = pad + c * (cell + pad)
             y = top + pad + r * (cell + pad)
 
-            # panel
             d.rectangle([x, y, x + cell, y + cell], outline=(70, 70, 70, 255), width=2)
 
-            # icon (centered)
             icon = assets.icons.get(i)
             if icon is not None:
                 ix = x + (cell - icon_sz) // 2
@@ -270,5 +293,4 @@ def render(ctx) -> Image.Image:
             img = overlay_hold_progress(img, "Hold K3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
         return img
 
-    # fallback
     return Image.new("RGB", (w, h), (0, 0, 0))

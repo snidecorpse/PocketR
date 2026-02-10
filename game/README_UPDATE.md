@@ -1,21 +1,18 @@
-# GAME folder update (OS shell)
+# Pocket-R GAME folder update (v3)
 
-Changes included in this update:
+Changes in this drop:
 
-- Intro splash stays longer (~3.5s) before going to the home screen.
-- Home screen: 2x2 icon grid with the earlier panel sizing (no bottom instruction bar).
-- Controls:
-  - D-pad: move selection
-  - **K1: confirm / open**
-  - **K2: back** (inside menus)
-  - **Hold K3: shutdown** (~3s)
+- Longer **animated** intro splash (fade-in + loading dots).
+- HOME confirm supports **K1** *and* joystick **PRESS**.
+- New **Settings** UI with proper bars/sliders:
+  - Brightness (applies immediately)
+  - Target FPS + Show FPS toggle
+  - Repo Path selector (for the updater)
+  - Debug page (scrollable)
+- Revamped **Updater** UI (reads Repo Path from Settings).
 
-Menus:
-1. Menu 1 (top-left): Game (placeholder room navigation)
-2. Menu 2 (top-right): Blank (reserved)
-3. Menu 3 (bottom-left): Settings/Debug info
-4. Menu 4 (bottom-right): Update (runs `git pull` via `game/scripts/update_repo.sh`, then reboots)
+## Notes about the updater
 
-## Note about center-press shutdown
-Your `app.py` still has a global **PRESS-hold 10s** shutdown in the engine loop.
-If you want *only* K3 to shutdown, change that block in `app.py` to watch K3 instead of PRESS.
+If you originally installed Pocket-R by copying a zip, your install folder will **not** be a git repo (no `.git/`), so `git pull` will fail.
+
+To enable in-device updates, install Pocket-R as a git clone, or point **Repo Path** in Settings to the folder that *is* a git clone.
