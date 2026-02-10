@@ -1,11 +1,10 @@
 [Unit]
 Description=Pocket-R Tamagotchi (auto-start)
-Wants=dev-spidev0.0.device
-After=dev-spidev0.0.device local-fs.target
+After=local-fs.target
+Wants=local-fs.target
 
 [Service]
 Type=simple
-# Run as the normal user so it sees the same Python packages that worked when you ran app.py manually.
 User=pi
 Group=pi
 SupplementaryGroups=gpio spi i2c
@@ -14,8 +13,8 @@ ExecStart=/usr/bin/python3 -u @@APP_DIR@@/app.py
 Restart=always
 RestartSec=1
 Environment=PYTHONUNBUFFERED=1
-# Fail fast if SPI device isn't present (SPI not enabled / wrong overlay)
-ExecStartPre=/bin/sh -c 'test -c /dev/spidev0.0 || { echo "Missing /dev/spidev0.0 (enable SPI via raspi-config)"; exit 1; }'
+# SPI device node can be 0.0 or 0.1 depending on wiring/overlay; just ensure *some* spidev exists.
+ExecStartPre=/bin/sh -c 'ls /dev/spidev* >/dev/null 2>&1 || { echo "Missing /dev/spidev* (enable SPI via raspi-config)"; exit 1; }'
 
 [Install]
 WantedBy=multi-user.target

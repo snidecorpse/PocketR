@@ -14,11 +14,12 @@ sudo chmod 0644 /etc/systemd/system/pocketr.service
 
 sudo systemctl daemon-reload
 sudo systemctl enable pocketr.service
+sudo systemctl reset-failed pocketr.service || true
 sudo systemctl restart pocketr.service
 
 echo
 echo "✅ Auto-boot enabled."
 echo "Check:"
-echo "  systemctl status pocketr.service --no-pager"
+echo "  sudo systemctl status pocketr.service -l --no-pager"
 echo "Logs:"
-echo "  journalctl -u pocketr.service -b -n 200 --no-pager"
+echo "  sudo journalctl -u pocketr.service -b -n 200 --no-pager"

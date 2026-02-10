@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 echo "=== pocketr.service enabled? ==="
-systemctl is-enabled pocketr.service || true
+sudo systemctl is-enabled pocketr.service || true
 echo
 echo "=== pocketr.service status ==="
-systemctl status pocketr.service --no-pager || true
+sudo systemctl status pocketr.service -l --no-pager || true
 echo
 echo "=== pocketr.service logs (this boot) ==="
-journalctl -u pocketr.service -b -n 200 --no-pager || true
+sudo journalctl -u pocketr.service -b -n 200 --no-pager || true
