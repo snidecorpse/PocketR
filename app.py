@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Pocket-R Tamagotchi Test (v5)
+Pocket-R Tamagotchi Test (v8 + INA219 battery)
 - Uses Waveshare ST7789 (240x240) demo driver (ST7789.py + config.py)
 - Joystick changes rooms
 - KEY1/KEY2/KEY3 do Feed / Play / Clean
@@ -18,6 +18,23 @@ from typing import Dict, Optional
 from PIL import Image, ImageDraw, ImageFont
 
 import ST7789
+
+try:
+    from battery_ina219 import INA219, INA219Config, voltage_to_percent_liion
+except Exception:
+    INA219 = None  # type: ignore
+    INA219Config = None  # type: ignore
+    voltage_to_percent_liion = None  # type: ignore
+
+
+# --------- Battery (INA219 over I2C) ---------
+BATTERY_ENABLED = True
+INA219_I2C_ADDR = 0x40
+INA219_SHUNT_OHMS = 0.1
+INA219_MAX_AMPS = 3.2
+BATTERY_CELL_COUNT = 1       # set 2 for 2S packs, etc.
+BATTERY_POLL_SECONDS = 2.0
+
 
 
 # --------- Settings you might tweak ---------
@@ -289,6 +306,23 @@ def main():
     font_m = load_font(16)
     font_l = load_font(22)
 
+
+# --- Battery monitor init (INA219 over I2C) ---
+battery = None
+battery_data = None
+last_battery_poll = 0.0
+if BATTERY_ENABLED and INA219 is not None:
+    try:
+        battery = INA219(INA219Config(
+            i2c_bus=1,
+            address=INA219_I2C_ADDR,
+            shunt_ohms=INA219_SHUNT_OHMS,
+            max_expected_amps=INA219_MAX_AMPS,
+        ))
+    except Exception:
+        battery = None
+# --------------------------------------------
+
     msgs = [
         "hi :)",
         "miss u",
@@ -306,6 +340,14 @@ def main():
 
         while True:
             now = time.time()
+
+# Poll battery occasionally (avoid per-frame I2C)
+if battery is not None and (now - last_battery_poll) >= BATTERY_POLL_SECONDS:
+    last_battery_poll = now
+    try:
+        battery_data = battery.read_all()
+    except Exception:
+        battery_data = None
             dt = max(0.0, min(now - t_last, 0.2))
             t_last = now
 
@@ -358,6 +400,24 @@ def main():
             draw.rectangle((0, 0, disp.width, 46), fill=(0, 0, 0))
             draw.text((8, 6), f"ROOM: {room}", font=font_m, fill=(255, 255, 255))
             room_icon(draw, room, 190, 6)
+
+# battery HUD (INA219)
+if battery_data is not None and voltage_to_percent_liion is not None:
+    try:
+        v = float(battery_data.get("load_v", 0.0))
+        pct = voltage_to_percent_liion(v, cells=BATTERY_CELL_COUNT)
+        bat_txt = f"BAT {pct:02d}% {v:0.2f}V"
+    except Exception:
+        bat_txt = "BAT --"
+elif battery_data is not None:
+    try:
+        v = float(battery_data.get("load_v", 0.0))
+        bat_txt = f"BAT {v:0.2f}V"
+    except Exception:
+        bat_txt = "BAT --"
+else:
+    bat_txt = "BAT --"
+draw.text((120, 10), bat_txt, font=font_s, fill=(220, 220, 220))
 
             draw_bar(draw, 8, 30, 52, 10, pet.hunger, "HUN", font=font_s)
             draw_bar(draw, 66, 30, 52, 10, pet.happy, "HAP", font=font_s)
@@ -430,6 +490,11 @@ def main():
             pass
         raise
     finally:
+        try:
+            if battery is not None:
+                battery.close()
+        except Exception:
+            pass
         try:
             disp.clear()
             disp.module_exit()
