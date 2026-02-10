@@ -1,7 +1,11 @@
 [Unit]
 Description=Pocket-R Tamagotchi (auto-start)
-After=local-fs.target
-Wants=local-fs.target
+After=multi-user.target
+Wants=multi-user.target
+
+# If the service crashes in a tight loop, systemd can rate-limit restarts.
+# Setting StartLimitIntervalSec=0 disables start rate-limiting so you can debug without lockouts.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -9,12 +13,18 @@ User=pi
 Group=pi
 SupplementaryGroups=gpio spi i2c
 WorkingDirectory=@@APP_DIR@@
-ExecStart=/usr/bin/python3 -u @@APP_DIR@@/app.py
-Restart=always
-RestartSec=1
 Environment=PYTHONUNBUFFERED=1
-# SPI device node can be 0.0 or 0.1 depending on wiring/overlay; just ensure *some* spidev exists.
-ExecStartPre=/bin/sh -c 'ls /dev/spidev* >/dev/null 2>&1 || { echo "Missing /dev/spidev* (enable SPI via raspi-config)"; exit 1; }'
+
+# Wait for SPI device nodes to appear on boot (they can show up late even when SPI is enabled).
+# Try for up to ~30 seconds.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do ls /dev/spidev* >/dev/null 2>&1 && exit 0; sleep 0.5; done; echo "Missing /dev/spidev* after 30s (is SPI enabled? dtparam=spi=on)"; ls -l /dev/spidev* 2>/dev/null || true; exit 1'
+
+ExecStart=/usr/bin/python3 -u @@APP_DIR@@/app.py
+
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
