@@ -23,14 +23,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable pocketr-splash.service
 sudo systemctl enable pocketr.service
 
-# Start splash immediately; then start game (game will stop splash)
 sudo systemctl restart pocketr-splash.service || true
 sudo systemctl restart pocketr.service || true
 
 echo
-echo "✅ Installed/updated services."
+echo "✅ Installed/updated services (no 90s spidev wait)."
 echo "Check:"
 echo "  systemctl status pocketr-splash.service --no-pager"
 echo "  systemctl status pocketr.service --no-pager"
-echo "Logs:"
-echo "  journalctl -u pocketr.service -b --no-pager | tail -n 200"
+echo "Boot delay debug:"
+echo "  ./deploy/diagnose_spidev_delay.sh"

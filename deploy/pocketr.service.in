@@ -1,20 +1,20 @@
 [Unit]
 Description=Pocket-R Tamagotchi (auto-start)
-Wants=dev-spidev0.0.device
-After=dev-spidev0.0.device systemd-modules-load.service pocketr-splash.service
+After=systemd-modules-load.service pocketr-splash.service
+Wants=pocketr-splash.service
 
 [Service]
 Type=simple
 WorkingDirectory=@@APP_DIR@@
-# Stop splash as soon as we're about to launch the game
 ExecStartPre=-/bin/systemctl stop pocketr-splash.service
-# Fail fast if SPI device isn't present (SPI not enabled / wrong overlay)
-ExecStartPre=/bin/sh -c 'test -c /dev/spidev0.0 || { echo "Missing /dev/spidev0.0 (enable SPI via raspi-config)"; exit 1; }'
+# Wait briefly for SPI node; avoid 90s systemd device timeout jobs
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 50); do test -c /dev/spidev0.0 && exit 0; sleep 0.1; done; echo "SPI /dev/spidev0.0 not ready"; exit 1'
 ExecStart=/usr/bin/python3 @@APP_DIR@@/app.py
 Restart=always
 RestartSec=1
 User=root
 Environment=PYTHONUNBUFFERED=1
+StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target

@@ -1,18 +1,19 @@
 [Unit]
 Description=Pocket-R Boot Splash (early)
-Wants=dev-spidev0.0.device
-After=dev-spidev0.0.device systemd-modules-load.service
-Before=pocketr.service getty@tty1.service
+After=systemd-modules-load.service
+Before=getty@tty1.service pocketr.service
 
 [Service]
 Type=simple
 WorkingDirectory=@@APP_DIR@@
-ExecStartPre=/bin/sh -c 'test -c /dev/spidev0.0 || { echo "Missing /dev/spidev0.0 (enable SPI)"; exit 1; }'
+# Wait briefly for SPI node; avoid 90s systemd device timeout jobs
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 50); do test -c /dev/spidev0.0 && exit 0; sleep 0.1; done; echo "SPI /dev/spidev0.0 not ready"; exit 1'
 ExecStart=/usr/bin/python3 @@APP_DIR@@/splash.py
 Restart=always
 RestartSec=0.5
 User=root
 Environment=PYTHONUNBUFFERED=1
+StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target
