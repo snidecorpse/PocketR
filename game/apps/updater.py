@@ -14,6 +14,7 @@ from ..ui_common import (
     draw_bottom_hint,
     draw_progress_bar,
     draw_top_bar,
+    wrap_text,
 )
 
 
@@ -41,6 +42,18 @@ def _repo_path(ctx) -> str:
     prefs = _read_prefs(ctx)
     rp = str(prefs.get("repo_path", "") or "")
     return rp if rp else getattr(ctx, "base_dir", "")
+
+
+def _git_root(path: str) -> str:
+    out = _run(["git", "-C", path, "rev-parse", "--show-toplevel"], timeout=1.0) if path else ""
+    p = (out or "").strip()
+    return p if p and os.path.isdir(p) else ""
+
+
+def _short(p: str, n: int = 28) -> str:
+    if not p:
+        return "-"
+    return p if len(p) <= n else ("…" + p[-(n - 1):])
 
 
 def _run(cmd: List[str], timeout: float = 0.9) -> str:
@@ -112,13 +125,21 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
 
     if stage == "CONFIRM":
         repo = _repo_path(ctx)
-        st["repo"] = repo
+        # Normalize to git root if possible (avoids wrong folder / CWD confusion)
+        repo_root = _git_root(repo) or repo
+        st["repo"] = repo_root
 
         if confirm:
-            if not _is_git_repo(repo):
+            if not _is_git_repo(repo_root):
                 st["stage"] = "ERROR"
-                st["msg"] = f"Not a git repo: {repo}"\
-                            "\n(You likely installed from a zip.)\nSet Repo Path in Settings."
+                cwd = os.getcwd()
+                base = getattr(ctx, "base_dir", "")
+                st["msg"] = (
+                    f"Not a git repo: {repo_root}"
+                    "\nSet Repo Path in Settings."
+                    f"\nBase: {base}"
+                    f"\nCWD: {cwd}"
+                )
                 return False
 
             # Start update subprocess
@@ -133,7 +154,7 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
                 script_path = os.path.join(ctx.game_dir, "scripts", "update_repo.sh")
                 log_f = open(LOG_PATH, "a", encoding="utf-8")
                 proc = subprocess.Popen(
-                    ["bash", script_path, repo],
+                    ["bash", script_path, repo_root],
                     stdout=log_f,
                     stderr=subprocess.STDOUT,
                 )
@@ -204,7 +225,9 @@ def render(ctx) -> Image.Image:
 
     if stage == "CONFIRM":
         d.text((10, y0), "This will git pull and reboot.", font=ctx.font_m, fill=(220, 220, 220))
-        d.text((10, y0 + 22), f"Repo: {repo}", font=ctx.font_s, fill=(170, 170, 170))
+
+        repo_disp = _short(str(repo), 34)
+        d.text((10, y0 + 22), f"Repo: {repo_disp}", font=ctx.font_s, fill=(170, 170, 170))
 
         y = y0 + 54
         # little warning box

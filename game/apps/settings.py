@@ -25,6 +25,11 @@ PREFS_FILE = "pocketr_settings.json"  # stored beside app.py (ctx.base_dir)
 BRIGHTNESS_STEP = 5
 FPS_MIN, FPS_MAX = 5, 30
 
+# UI sizing (fits 240x240 and smaller, with scroll)
+ITEM_H = 36
+ITEM_GAP = 6
+BOTTOM_BAR_H = 24
+
 
 def _run(cmd: List[str], timeout: float = 0.8) -> str:
     try:
@@ -63,12 +68,26 @@ def _default_repo_candidates(ctx) -> List[str]:
     # common places
     candidates = [
         base,
+        os.path.join(home, "PocketR"),
         os.path.join(home, "pocketr"),
         os.path.join(home, "Pocket-R"),
+        os.path.join(home, "PocketR"),
         "/opt/pocketr",
         "/home/pi/pocketr",
         "/home/pizero/pocketr",
+        "/home/pizero/PocketR",
+        "/home/pizero2/PocketR",
     ]
+
+    # Also try a few common names under /home/* (lightweight glob)
+    try:
+        import glob
+
+        for pat in ("/home/*/PocketR", "/home/*/Pocket-R", "/home/*/pocketr", "/home/*/PocketR"):
+            for p in glob.glob(pat):
+                candidates.append(p)
+    except Exception:
+        pass
 
     # de-dupe while preserving order
     out: List[str] = []
@@ -89,6 +108,15 @@ def _is_git_repo(path: str) -> bool:
         return False
     out = _run(["git", "-C", path, "rev-parse", "--is-inside-work-tree"], timeout=0.7)
     return out.strip() == "true"
+
+
+def _git_root(path: str) -> str:
+    """Return git top-level for a path, or empty string."""
+    if not path:
+        return ""
+    out = _run(["git", "-C", path, "rev-parse", "--show-toplevel"], timeout=0.8)
+    p = (out or "").strip()
+    return p if p and os.path.isdir(p) else ""
 
 
 def _short_path(p: str, max_len: int = 22) -> str:
@@ -130,7 +158,9 @@ def _ensure_prefs(ctx) -> Dict:
     prefs["show_fps"] = bool(prefs.get("show_fps", False))
 
     rp = str(prefs.get("repo_path", "") or "")
-    prefs["repo_path"] = rp
+    # If possible, normalize to the git repo root (fixes wrong paths / CWD confusion)
+    root = _git_root(rp) or _git_root(getattr(ctx, "base_dir", ""))
+    prefs["repo_path"] = root if root else rp
 
     ctx.user["_prefs"] = prefs
     return prefs
@@ -203,7 +233,7 @@ def _build_debug_lines(ctx, prefs: Dict) -> List[str]:
         f"CPU temp: {temp}",
         f"Brightness: {prefs.get('brightness', 60)}%",
         f"FPS (live): {fps_live:.1f}",
-        f"Target FPS: {prefs.get('target_fps', 15)} (needs launcher support)",
+        f"Target FPS: {prefs.get('target_fps', 15)}",
         f"Repo: {repo}",
         f"Git: {git_short}",
         "",
@@ -310,6 +340,23 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
 
     ctx.user["_settings_sel"] = sel
 
+    # keep selection visible (scroll window)
+    w = int(getattr(ctx.disp, "width", 240))
+    h = int(getattr(ctx.disp, "height", 240))
+    # match draw_top_bar sizing: bar_h + 8
+    top_bar_h = 34 if h >= 200 else 28
+    y0 = top_bar_h + 8
+    content_h = max(0, (h - BOTTOM_BAR_H) - y0)
+    slot = ITEM_H + ITEM_GAP
+    visible = max(1, int(content_h // max(1, slot)))
+    scroll = int(ctx.user.get("_settings_scroll", 0))
+    if sel < scroll:
+        scroll = sel
+    elif sel >= scroll + visible:
+        scroll = sel - visible + 1
+    scroll = max(0, min(scroll, max(0, len(items) - visible)))
+    ctx.user["_settings_scroll"] = scroll
+
     # save occasionally
     if ev:
         _save_prefs(ctx)
@@ -358,31 +405,35 @@ def render(ctx) -> Image.Image:
         return img
 
     # LIST
-    y0 = draw_top_bar(img, "Settings", ctx.font_l)
-    d = ImageDraw.Draw(img)
-
     items = _list_items(ctx, prefs)
     sel = int(ctx.user.get("_settings_sel", 0))
+    y0 = draw_top_bar(img, "Settings", ctx.font_l, right_text=f"{sel+1}/{len(items)}")
+    d = ImageDraw.Draw(img)
 
-    # list geometry
-    item_h = 42
+    # list geometry + scrolling
+    scroll = int(ctx.user.get("_settings_scroll", 0))
     x = 10
     w_item = w - 20
-    y = y0
+    slot = ITEM_H + ITEM_GAP
+    content_h = max(0, (h - BOTTOM_BAR_H) - y0)
+    visible = max(1, int(content_h // max(1, slot)))
+    scroll = max(0, min(scroll, max(0, len(items) - visible)))
+    ctx.user["_settings_scroll"] = scroll
 
-    # if it ever grows, scroll; for now 5 items always fit on 240
-    for i, (left, right) in enumerate(items):
-        draw_list_item(d, x, y, w_item, item_h, left, right, ctx.font_m, selected=(i == sel))
+    y = y0
+    for row, i in enumerate(range(scroll, min(len(items), scroll + visible))):
+        left, right = items[i]
+        draw_list_item(d, x, y, w_item, ITEM_H, left, right, ctx.font_m, selected=(i == sel))
 
         # sliders for brightness + fps
         if i == 0:
             frac = float(prefs.get("brightness", 60)) / 100.0
-            draw_progress_bar(d, x + 12, y + item_h - 14, w_item - 24, 8, frac)
+            draw_progress_bar(d, x + 12, y + ITEM_H - 12, w_item - 24, 8, frac)
         if i == 1:
             frac = (float(prefs.get("target_fps", 15)) - FPS_MIN) / float(FPS_MAX - FPS_MIN)
-            draw_progress_bar(d, x + 12, y + item_h - 14, w_item - 24, 8, frac)
+            draw_progress_bar(d, x + 12, y + ITEM_H - 12, w_item - 24, 8, frac)
 
-        y += item_h + 8
+        y += slot
 
     # tiny status line
     fps_live = float(ctx.user.get("_fps_smooth", 0.0) or 0.0)

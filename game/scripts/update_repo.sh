@@ -27,47 +27,17 @@ for _ in 1 2 3 4 5 6; do
 done
 
 if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  # Try to find a git repo inside the given directory (bounded depth)
-  if [[ -d "$REPO_DIR" ]]; then
-    FOUND_GIT="$(find "$REPO_DIR" -maxdepth 3 -type d -name .git -print -quit 2>/dev/null || true)"
-    if [[ -n "$FOUND_GIT" ]]; then
-      REPO_DIR="$(dirname "$FOUND_GIT")"
-    fi
-  fi
-fi
-
-if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "ERROR: $REPO_DIR is not a git repo" >&2
   echo "Hint: install Pocket-R by cloning the repo, not by copying a zip." >&2
   exit 3
 fi
 
-TARGET_USER=""
-if id -u pizero >/dev/null 2>&1; then
-  TARGET_USER="pizero"
-elif id -u pi >/dev/null 2>&1; then
-  TARGET_USER="pi"
-fi
-
-run_git() {
-  if [[ "$(id -u)" == "0" && -n "$TARGET_USER" ]]; then
-    # runuser is preferred (no sudo password). fall back to sudo if available.
-    if command -v runuser >/dev/null 2>&1; then
-      runuser -u "$TARGET_USER" -- git "$@"
-    else
-      sudo -u "$TARGET_USER" git "$@"
-    fi
-  else
-    git "$@"
-  fi
-}
-
-# If running as root, recent git may need safe.directory
-run_git config --global --add safe.directory "$REPO_DIR" >/dev/null 2>&1 || true
+# If running under sudo/root on a recent git, you may need safe.directory
+git config --global --add safe.directory "$REPO_DIR" >/dev/null 2>&1 || true
 
 echo "[Pocket-R] repo: $REPO_DIR"
 echo "[Pocket-R] git pull..."
-run_git -C "$REPO_DIR" pull --rebase --autostash
+git -C "$REPO_DIR" pull --rebase --autostash
 
 echo "[Pocket-R] update ok"
 sync
