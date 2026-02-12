@@ -76,7 +76,7 @@ def _load_cards(ctx, w: int, h: int, tag: str) -> List[Image.Image]:
 
     cards: List[Image.Image] = []
     for p in paths:
-        card = Image.new("RGB", (w, h), (12, 10, 12))
+        card = Image.new("RGB", (w, h), (10, 8, 10))
         d = ImageDraw.Draw(card)
 
         try:
@@ -88,7 +88,8 @@ def _load_cards(ctx, w: int, h: int, tag: str) -> List[Image.Image]:
         except Exception:
             d.text((8, 8), "Image load failed", font=ctx.font_s, fill=(255, 120, 120))
 
-        d.rounded_rectangle([0, 0, w - 1, h - 1], radius=10, outline=(255, 215, 205), width=2)
+        d.rounded_rectangle([0, 0, w - 1, h - 1], radius=7, outline=(255, 218, 208), width=2)
+        d.rounded_rectangle([2, 2, w - 3, h - 3], radius=6, outline=(92, 66, 62), width=1)
         cards.append(card)
 
     cache_map[key] = cards
@@ -207,25 +208,34 @@ def _draw_header(ctx, img: Image.Image, mode_label: str, right: str) -> Tuple[Im
     w, h = img.size
     img = overlay_panel(
         img,
-        (8, 8, w - 9, 56),
-        radius=13,
-        fill=(6, 6, 10, 170),
+        (8, 8, w - 9, 42),
+        radius=10,
+        fill=(6, 6, 10, 176),
         outline=(255, 220, 210, 120),
         width=2,
     )
     d = ImageDraw.Draw(img)
-    d.text((16, 16), "Gallery", font=ctx.font_m, fill=(255, 248, 244))
-    d.text((16, 37), mode_label, font=ctx.font_s, fill=(220, 200, 192))
+    d.text((16, 15), "Gallery", font=ctx.font_m, fill=(255, 248, 244))
+
+    chip = str(mode_label or "").strip()
+    if chip:
+        ctw = int(d.textlength(chip, font=ctx.font_s))
+        cx0 = (w - (ctw + 16)) // 2
+        cy0 = 14
+        cx1 = cx0 + ctw + 16
+        cy1 = cy0 + 16
+        d.rounded_rectangle([cx0, cy0, cx1, cy1], radius=5, fill=(16, 10, 12, 210), outline=(255, 214, 204, 120), width=1)
+        d.text((cx0 + 8, cy0 + 3), chip, font=ctx.font_s, fill=(235, 220, 214))
 
     tw = int(d.textlength(right, font=ctx.font_s))
-    d.text((w - 14 - tw, 22), right, font=ctx.font_s, fill=(220, 210, 205))
+    d.text((w - 14 - tw, 16), right, font=ctx.font_s, fill=(220, 210, 205))
 
-    content_rect = (8, 66, w - 9, h - 9)
+    content_rect = (8, 50, w - 9, h - 9)
     img = overlay_panel(
         img,
         content_rect,
-        radius=16,
-        fill=(6, 6, 10, 145),
+        radius=12,
+        fill=(6, 6, 10, 158),
         outline=(255, 220, 210, 90),
         width=2,
     )
@@ -236,8 +246,9 @@ def _render_empty(ctx, img: Image.Image, rect: Tuple[int, int, int, int]) -> Ima
     d = ImageDraw.Draw(img)
     x0, y0, x1, _y1 = rect
     d.text((x0 + 12, y0 + 16), "No gallery images found.", font=ctx.font_m, fill=(240, 230, 226))
-    d.text((x0 + 12, y0 + 42), "Add .png/.jpg files in:", font=ctx.font_s, fill=(215, 190, 182))
-    d.text((x0 + 12, y0 + 58), "game/assets/blank_gallery/", font=ctx.font_s, fill=(215, 190, 182))
+    d.text((x0 + 12, y0 + 40), "Add .png/.jpg files in:", font=ctx.font_s, fill=(215, 190, 182))
+    d.text((x0 + 12, y0 + 56), "game/assets/blank_gallery/", font=ctx.font_s, fill=(215, 190, 182))
+    d.text((x0 + 12, y0 + 78), "B2 Back", font=ctx.font_s, fill=(215, 190, 182))
     return img
 
 
@@ -259,6 +270,7 @@ def _render_slide(ctx, img: Image.Image, rect: Tuple[int, int, int, int], cards:
     if prev_idx is not None:
         p = min(1.0, max(0.0, (time.time() - anim_t0) / max(0.001, swipe_seconds)))
 
+    d.rounded_rectangle([content_x - 2, content_y - 2, content_x + content_w + 1, content_y + content_h + 1], radius=7, outline=(255, 220, 210), width=1)
     cur = cards[idx]
     if prev_idx is not None and 0 <= int(prev_idx) < count and p < 1.0:
         prev = cards[int(prev_idx)]
@@ -277,7 +289,12 @@ def _render_slide(ctx, img: Image.Image, rect: Tuple[int, int, int, int], cards:
 
     page = f"{idx + 1}/{count}"
     tw = int(d.textlength(page, font=ctx.font_s))
-    d.text((x1 - 12 - tw, y0 + 6), page, font=ctx.font_s, fill=(220, 200, 192))
+    px1 = x1 - 10
+    px0 = px1 - tw - 12
+    py0 = y0 + 6
+    py1 = py0 + 14
+    d.rounded_rectangle([px0, py0, px1, py1], radius=5, fill=(14, 10, 12, 205), outline=(255, 210, 198, 110), width=1)
+    d.text((px0 + 6, py0 + 2), page, font=ctx.font_s, fill=(228, 214, 208))
 
     if show_filename:
         name = os.path.basename(_gallery_paths(ctx)[idx])
@@ -285,7 +302,7 @@ def _render_slide(ctx, img: Image.Image, rect: Tuple[int, int, int, int], cards:
         box_w = min(content_w, ntw + 20)
         bx0 = content_x + (content_w - box_w) // 2
         by0 = y1 - 26
-        d.rounded_rectangle([bx0, by0, bx0 + box_w, by0 + 18], radius=8, fill=(8, 8, 10, 190), outline=(255, 210, 198), width=1)
+        d.rounded_rectangle([bx0, by0, bx0 + box_w, by0 + 18], radius=6, fill=(8, 8, 10, 198), outline=(255, 210, 198, 130), width=1)
         d.text((bx0 + (box_w - ntw) // 2, by0 + 3), name, font=ctx.font_s, fill=(235, 225, 220))
 
     return img
@@ -321,18 +338,19 @@ def _render_grid(ctx, img: Image.Image, rect: Tuple[int, int, int, int], thumbs:
         y = content_y + row * (cell_h + gap)
 
         if item_idx >= count:
-            d.rounded_rectangle([x, y, x + cell_w, y + cell_h], radius=8, fill=(20, 12, 12), outline=(120, 90, 86), width=1)
+            d.rounded_rectangle([x, y, x + cell_w, y + cell_h], radius=6, fill=(20, 12, 12), outline=(120, 90, 86), width=1)
             continue
 
+        d.rounded_rectangle([x, y, x + cell_w, y + cell_h], radius=6, fill=(12, 8, 10), outline=(92, 70, 68), width=1)
         thumb = thumbs[item_idx]
         tx = x + max(0, (cell_w - thumb.width) // 2)
         ty = y + max(0, (cell_h - thumb.height) // 2)
         img.paste(thumb, (tx, ty))
 
         if item_idx == idx:
-            d.rounded_rectangle([x - 2, y - 2, x + cell_w + 2, y + cell_h + 2], radius=9, outline=(255, 235, 222), width=3)
+            d.rounded_rectangle([x - 2, y - 2, x + cell_w + 2, y + cell_h + 2], radius=7, outline=(255, 238, 228), width=2)
         else:
-            d.rounded_rectangle([x, y, x + cell_w, y + cell_h], radius=8, outline=(210, 170, 160), width=1)
+            d.rounded_rectangle([x, y, x + cell_w, y + cell_h], radius=6, outline=(210, 170, 160), width=1)
 
     label = f"Page {page + 1}/{max(1, pages)}"
     tw = int(d.textlength(label, font=ctx.font_s))
@@ -346,9 +364,9 @@ def render(ctx) -> Image.Image:
     focus = bool(ctx.user.get("_blank_focus", False))
 
     w, h = int(ctx.disp.width), int(ctx.disp.height)
-    base = app_background(ctx, dim_alpha=104)
+    base = app_background(ctx, dim_alpha=112)
 
-    mode_label = "Slide Mode" if mode == "SLIDE" else ("Grid Focus" if focus else "Grid Mode")
+    mode_label = "Slide" if mode == "SLIDE" else ("Grid Focus" if focus else "Grid")
     right = "B2 Grid" if (mode == "GRID" and focus) else "B2 Back"
     base, rect = _draw_header(ctx, base, mode_label, right)
 

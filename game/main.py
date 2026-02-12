@@ -30,6 +30,7 @@ INTRO_FADE_IN_SECONDS = 1.2  # fade-in duration
 INTRO_FADE_OUT_SECONDS = 1.6 # transition to HOME
 HOME_FADE_IN_SECONDS = 1.0   # transition from black into HOME
 K3_SHUTDOWN_HOLD = 3.0    # seconds to hold K3 to power off
+K3_OVERLAY_SHOW_DELAY = 0.45
 
 
 @dataclass
@@ -374,7 +375,7 @@ def render(ctx) -> Image.Image:
         img = base.convert("RGB")
 
         held = float(ctx.user.get("_k3_held", 0.0))
-        if held > 0:
+        if held >= K3_OVERLAY_SHOW_DELAY:
             img = overlay_hold_progress(img, "Hold B3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
         return img
 
@@ -386,6 +387,7 @@ def render(ctx) -> Image.Image:
         pad, cell, icon_sz, top = _layout(w, h)
         sel = int(ctx.user.get("os_selected", 0))
         now = time.time()
+        sel_rect = None
 
         for i in range(4):
             r, c = divmod(i, 2)
@@ -407,26 +409,22 @@ def render(ctx) -> Image.Image:
                 img.paste(icon, (ix, iy), icon)
 
             if i == sel:
-                pulse = breathe(now, 4.8)
-                glow_outer = int(34 + 84 * pulse)
-                glow_inner = int(82 + 150 * pulse)
-                rad = max(8, cell // 12)
-                img = _draw_pulse_ring(
-                    img,
-                    (x - 8, y - 8, x + cell + 8, y + cell + 8),
-                    radius=rad + 3,
-                    thickness=4,
-                    color=(255, 230, 210),
-                    alpha=glow_outer,
-                )
-                img = _draw_pulse_ring(
-                    img,
-                    (x - 3, y - 3, x + cell + 3, y + cell + 3),
-                    radius=rad,
-                    thickness=2,
-                    color=(255, 245, 235),
-                    alpha=glow_inner,
-                )
+                sel_rect = (x, y, x + cell, y + cell)
+
+        # Draw selection pulse last so other tile draws never clip/flicker its edges.
+        if sel_rect is not None:
+            x0, y0, x1, y1 = sel_rect
+            pulse = breathe(now, 4.8)
+            rad = max(8, cell // 12)
+            alpha = int(90 + 140 * pulse)
+            img = _draw_pulse_ring(
+                img,
+                (x0 - 4, y0 - 4, x1 + 4, y1 + 4),
+                radius=rad + 1,
+                thickness=3,
+                color=(255, 244, 236),
+                alpha=alpha,
+            )
 
         out = img.convert("RGB")
 
@@ -441,7 +439,7 @@ def render(ctx) -> Image.Image:
             else:
                 ctx.user["_home_t0"] = None
         held = float(ctx.user.get("_k3_held", 0.0))
-        if held > 0:
+        if held >= K3_OVERLAY_SHOW_DELAY:
             out = overlay_hold_progress(out, "Hold B3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
         return out
 
@@ -469,7 +467,7 @@ def render(ctx) -> Image.Image:
             d.text((12, 48), "B2 to go back", font=ctx.font_m, fill=(220, 220, 220))
 
         held = float(ctx.user.get("_k3_held", 0.0))
-        if held > 0:
+        if held >= K3_OVERLAY_SHOW_DELAY:
             img = overlay_hold_progress(img, "Hold B3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
         return img
 

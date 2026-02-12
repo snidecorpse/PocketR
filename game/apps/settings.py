@@ -30,8 +30,17 @@ ITEM_GAP = 6
 MODE_LIST = "LIST"
 MODE_HELP = "HELP"
 MODE_GALLERY = "GALLERY"
+MODE_PET = "PET"
+MODE_UPDATER_SOURCE = "UPDATER_SOURCE"
 MODE_DEBUG = "DEBUG"
 MODE_SHUTDOWN = "SHUTDOWN"
+
+UPDATER_PRESETS = [
+    "/root/PocketR",
+    "/root/pocketr",
+    "/home/pi/PocketR",
+    "/home/pi/pocketr",
+]
 
 
 def _run(cmd: List[str], timeout: float = 0.8) -> str:
@@ -59,6 +68,28 @@ def _defaults(ctx) -> Dict:
         "gallery_auto_seconds": 3.2,
         "gallery_swipe_seconds": 0.22,
         "gallery_show_filename": True,
+        "updater_source_mode": "AUTO",
+        "updater_source_value": UPDATER_PRESETS[0],
+        "pet_game": _pet_defaults(),
+    }
+
+
+def _pet_defaults() -> Dict:
+    return {
+        "sim_speed": 1.0,
+        "difficulty_profile": "normal",
+        "decay_hunger_mult": 1.0,
+        "decay_energy_mult": 1.0,
+        "decay_hygiene_mult": 1.0,
+        "decay_social_mult": 1.0,
+        "decay_fun_mult": 1.0,
+        "decay_bladder_mult": 1.0,
+        "hp_loss_mult": 1.0,
+        "hp_regen_mult": 1.0,
+        "brick_speed_mult": 1.0,
+        "memory_reveal_seconds": 1.1,
+        "runner_speed_mult": 1.0,
+        "show_tutorial_next_open": False,
     }
 
 
@@ -80,6 +111,25 @@ def _git_root(path: str) -> str:
 def _coerce_mode(v) -> str:
     s = str(v or "SLIDE").strip().upper()
     return "GRID" if s == "GRID" else "SLIDE"
+
+
+def _coerce_updater_mode(v) -> str:
+    s = str(v or "AUTO").strip().upper()
+    return "PRESET" if s == "PRESET" else "AUTO"
+
+
+def _coerce_profile(v) -> str:
+    s = str(v or "normal").strip().lower()
+    if s in ("easy", "normal", "hard", "custom"):
+        return s
+    return "normal"
+
+
+def _coerce_mult(v: float, lo: float = 0.5, hi: float = 2.0, d: int = 2) -> float:
+    try:
+        return round(clamp(float(v), lo, hi), d)
+    except Exception:
+        return round(clamp(1.0, lo, hi), d)
 
 
 def _ensure_prefs(ctx) -> Dict:
@@ -122,6 +172,43 @@ def _ensure_prefs(ctx) -> Dict:
 
     prefs["gallery_show_filename"] = bool(prefs.get("gallery_show_filename", True))
 
+    prefs["updater_source_mode"] = _coerce_updater_mode(prefs.get("updater_source_mode", "AUTO"))
+    src_val = str(prefs.get("updater_source_value", UPDATER_PRESETS[0]) or UPDATER_PRESETS[0]).strip()
+    prefs["updater_source_value"] = src_val if src_val else UPDATER_PRESETS[0]
+
+    # Pet settings (advanced)
+    base_pg = _pet_defaults()
+    raw_pg = prefs.get("pet_game", {})
+    if isinstance(raw_pg, dict):
+        for k in base_pg:
+            if k in raw_pg:
+                base_pg[k] = raw_pg[k]
+
+    base_pg["sim_speed"] = _coerce_mult(base_pg.get("sim_speed", 1.0), 0.5, 2.0, 2)
+    base_pg["difficulty_profile"] = _coerce_profile(base_pg.get("difficulty_profile", "normal"))
+
+    for k in (
+        "decay_hunger_mult",
+        "decay_energy_mult",
+        "decay_hygiene_mult",
+        "decay_social_mult",
+        "decay_fun_mult",
+        "decay_bladder_mult",
+        "hp_loss_mult",
+        "hp_regen_mult",
+        "brick_speed_mult",
+        "runner_speed_mult",
+    ):
+        base_pg[k] = _coerce_mult(base_pg.get(k, 1.0), 0.5, 2.0, 2)
+
+    try:
+        base_pg["memory_reveal_seconds"] = round(clamp(float(base_pg.get("memory_reveal_seconds", 1.1)), 0.3, 3.0), 2)
+    except Exception:
+        base_pg["memory_reveal_seconds"] = 1.1
+
+    base_pg["show_tutorial_next_open"] = bool(base_pg.get("show_tutorial_next_open", False))
+    prefs["pet_game"] = base_pg
+
     ctx.user["_prefs"] = prefs
     return prefs
 
@@ -159,6 +246,13 @@ def init(ctx):
 
     ctx.user.setdefault("_settings_gallery_sel", 0)
     ctx.user.setdefault("_settings_gallery_scroll", 0)
+    ctx.user.setdefault("_settings_pet_sel", 0)
+    ctx.user.setdefault("_settings_pet_scroll", 0)
+    ctx.user.setdefault("_settings_updater_sel", 0)
+    ctx.user.setdefault("_settings_updater_scroll", 0)
+    ctx.user.setdefault("_pet_reset_arm", False)
+    ctx.user.setdefault("_pet_settings_note", "")
+    ctx.user.setdefault("_pet_settings_note_until", 0.0)
 
     ctx.user.setdefault("_help_scroll", 0)
     ctx.user.setdefault("_debug_scroll", 0)
@@ -180,7 +274,8 @@ def _help_lines() -> List[str]:
         "Update: pulls latest git changes then reboots Linux.",
         "",
         "Update Notes",
-        "Updater auto-targets /root/PocketR on Pi.",
+        "Updater can run AUTO or PRESET source mode.",
+        "Direct git pull runs first, script fallback runs next.",
         "If pull fails, check network, git remote, and branch state.",
     ]
 
@@ -242,13 +337,23 @@ def _build_debug_lines(ctx, prefs: Dict) -> List[str]:
 def _list_items(prefs: Dict) -> List[Tuple[str, str]]:
     return [
         ("Controls & Help", ">"),
-        ("Gallery Settings", ">"),
         ("Brightness", f"{int(prefs.get('brightness', 60))}%"),
-        ("Target FPS", str(int(prefs.get("target_fps", 15)))),
-        ("Show FPS", "ON" if prefs.get("show_fps", False) else "OFF"),
-        ("Debug", ">"),
         ("Shutdown", ">"),
+        ("Show FPS", "ON" if prefs.get("show_fps", False) else "OFF"),
+        ("Pet Game Settings", ">"),
+        ("Gallery Settings", ">"),
+        ("Target FPS", str(int(prefs.get("target_fps", 15)))),
+        ("Source", _updater_source_label(prefs)),
+        ("Debug", ">")
     ]
+
+
+def _updater_source_label(prefs: Dict) -> str:
+    mode = _coerce_updater_mode(prefs.get("updater_source_mode", "AUTO"))
+    if mode == "AUTO":
+        return "AUTO"
+    path = str(prefs.get("updater_source_value", UPDATER_PRESETS[0]) or UPDATER_PRESETS[0])
+    return os.path.basename(path.rstrip("/")) or path
 
 
 def _gallery_items(prefs: Dict) -> List[Tuple[str, str]]:
@@ -261,10 +366,81 @@ def _gallery_items(prefs: Dict) -> List[Tuple[str, str]]:
     ]
 
 
+def _updater_items(prefs: Dict) -> List[Tuple[str, str]]:
+    mode = _coerce_updater_mode(prefs.get("updater_source_mode", "AUTO"))
+    path = str(prefs.get("updater_source_value", UPDATER_PRESETS[0]) or UPDATER_PRESETS[0])
+    return [
+        ("Source Mode", mode),
+        ("Preset Path", path if mode == "PRESET" else "(auto mode)"),
+        ("Fallback", "Auto preset chain"),
+    ]
+
+
+def _pet_items(prefs: Dict) -> List[Tuple[str, str]]:
+    pg = prefs.get("pet_game", {}) if isinstance(prefs.get("pet_game"), dict) else _pet_defaults()
+    return [
+        ("Sim Speed", f"{float(pg.get('sim_speed', 1.0)):.2f}"),
+        ("Difficulty", str(pg.get("difficulty_profile", "normal")).title()),
+        ("Decay Hunger", f"{float(pg.get('decay_hunger_mult', 1.0)):.2f}"),
+        ("Decay Energy", f"{float(pg.get('decay_energy_mult', 1.0)):.2f}"),
+        ("Decay Hygiene", f"{float(pg.get('decay_hygiene_mult', 1.0)):.2f}"),
+        ("Decay Social", f"{float(pg.get('decay_social_mult', 1.0)):.2f}"),
+        ("Decay Fun", f"{float(pg.get('decay_fun_mult', 1.0)):.2f}"),
+        ("Decay Bladder", f"{float(pg.get('decay_bladder_mult', 1.0)):.2f}"),
+        ("HP Loss", f"{float(pg.get('hp_loss_mult', 1.0)):.2f}"),
+        ("HP Regen", f"{float(pg.get('hp_regen_mult', 1.0)):.2f}"),
+        ("Brick Speed", f"{float(pg.get('brick_speed_mult', 1.0)):.2f}"),
+        ("Memory Reveal", f"{float(pg.get('memory_reveal_seconds', 1.1)):.2f}s"),
+        ("Runner Speed", f"{float(pg.get('runner_speed_mult', 1.0)):.2f}"),
+        ("Show Tutorial", "ON" if bool(pg.get("show_tutorial_next_open", False)) else "OFF"),
+        ("Reset Pet State", "Confirm"),
+        ("Export Snapshot", "Run"),
+    ]
+
+
+def _pet_set_note(ctx, text: str, seconds: float = 2.2) -> None:
+    ctx.user["_pet_settings_note"] = str(text)
+    ctx.user["_pet_settings_note_until"] = time.time() + max(1.0, float(seconds))
+
+
+def _reset_pet_state(ctx) -> bool:
+    try:
+        if hasattr(ctx, "data_path"):
+            path = ctx.data_path("pet", "state.json")
+        else:
+            data_dir = ensure_data_dir(ctx)
+            path = os.path.join(data_dir, "pet", "state.json")
+        if os.path.isfile(path):
+            os.remove(path)
+        ctx.user.pop("pet_game_v3", None)
+        return True
+    except Exception:
+        return False
+
+
+def _export_pet_snapshot(ctx, prefs: Dict) -> str:
+    try:
+        now = time.strftime("%Y%m%d_%H%M%S")
+        rel = f"pet/snapshots/snapshot_{now}.json"
+        payload = {
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "pet_prefs": prefs.get("pet_game", {}),
+            "pet_state": read_json(ctx, "pet/state.json", {}),
+        }
+        write_json_atomic(ctx, rel, payload)
+        return rel
+    except Exception:
+        return ""
+
+
 def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
     prefs = _ensure_prefs(ctx)
     mode = str(ctx.user.get("_settings_mode", MODE_LIST))
     confirm = ("K1" in ev) or ("PRESS" in ev)
+    now = time.time()
+
+    if now >= float(ctx.user.get("_pet_settings_note_until", 0.0)):
+        ctx.user["_pet_settings_note"] = ""
 
     if "K2" in ev:
         if mode == MODE_LIST:
@@ -297,6 +473,151 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
             ctx.user["_debug_scroll"] = int(ctx.user.get("_debug_scroll", 0)) + 4
         if confirm:
             ctx.user["_debug_cache"] = {"t": 0.0, "lines": []}
+        return False
+
+    if mode == MODE_UPDATER_SOURCE:
+        items = _updater_items(prefs)
+        sel = int(ctx.user.get("_settings_updater_sel", 0))
+        sel = max(0, min(sel, len(items) - 1))
+
+        if "UP" in ev:
+            sel = (sel - 1) % len(items)
+        if "DOWN" in ev:
+            sel = (sel + 1) % len(items)
+
+        if sel == 0 and ("LEFT" in ev or "RIGHT" in ev or confirm):
+            cur = _coerce_updater_mode(prefs.get("updater_source_mode", "AUTO"))
+            prefs["updater_source_mode"] = "PRESET" if cur == "AUTO" else "AUTO"
+
+        elif sel == 1 and ("LEFT" in ev or "RIGHT" in ev or confirm):
+            cur_path = str(prefs.get("updater_source_value", UPDATER_PRESETS[0]) or UPDATER_PRESETS[0]).strip()
+            try:
+                idx = UPDATER_PRESETS.index(cur_path)
+            except ValueError:
+                idx = 0
+            if "LEFT" in ev:
+                idx = (idx - 1) % len(UPDATER_PRESETS)
+            else:
+                idx = (idx + 1) % len(UPDATER_PRESETS)
+            prefs["updater_source_value"] = UPDATER_PRESETS[idx]
+
+        ctx.user["_settings_updater_sel"] = sel
+        h = int(getattr(ctx.disp, "height", 240))
+        content_h = max(1, h - 66)
+        visible = max(1, int(content_h // max(1, ITEM_H + ITEM_GAP)))
+        scroll = int(ctx.user.get("_settings_updater_scroll", 0))
+        ctx.user["_settings_updater_scroll"] = _ensure_visible(sel, scroll, len(items), visible)
+        if ev:
+            _save_prefs(ctx)
+        return False
+
+    if mode == MODE_PET:
+        items = _pet_items(prefs)
+        sel = int(ctx.user.get("_settings_pet_sel", 0))
+        sel = max(0, min(sel, len(items) - 1))
+        pg = prefs.get("pet_game", {}) if isinstance(prefs.get("pet_game"), dict) else _pet_defaults()
+
+        if "UP" in ev:
+            sel = (sel - 1) % len(items)
+            ctx.user["_pet_reset_arm"] = False
+        if "DOWN" in ev:
+            sel = (sel + 1) % len(items)
+            ctx.user["_pet_reset_arm"] = False
+
+        mult_delta = 0.05
+        if sel == 0:
+            if "LEFT" in ev:
+                pg["sim_speed"] = _coerce_mult(float(pg.get("sim_speed", 1.0)) - 0.05, 0.5, 2.0, 2)
+            if "RIGHT" in ev:
+                pg["sim_speed"] = _coerce_mult(float(pg.get("sim_speed", 1.0)) + 0.05, 0.5, 2.0, 2)
+        elif sel == 1 and ("LEFT" in ev or "RIGHT" in ev or confirm):
+            order = ["easy", "normal", "hard", "custom"]
+            cur = _coerce_profile(pg.get("difficulty_profile", "normal"))
+            idx = order.index(cur)
+            idx = (idx - 1) % len(order) if "LEFT" in ev else (idx + 1) % len(order)
+            pg["difficulty_profile"] = order[idx]
+        elif sel == 2:
+            if "LEFT" in ev:
+                pg["decay_hunger_mult"] = _coerce_mult(float(pg.get("decay_hunger_mult", 1.0)) - mult_delta)
+            if "RIGHT" in ev:
+                pg["decay_hunger_mult"] = _coerce_mult(float(pg.get("decay_hunger_mult", 1.0)) + mult_delta)
+        elif sel == 3:
+            if "LEFT" in ev:
+                pg["decay_energy_mult"] = _coerce_mult(float(pg.get("decay_energy_mult", 1.0)) - mult_delta)
+            if "RIGHT" in ev:
+                pg["decay_energy_mult"] = _coerce_mult(float(pg.get("decay_energy_mult", 1.0)) + mult_delta)
+        elif sel == 4:
+            if "LEFT" in ev:
+                pg["decay_hygiene_mult"] = _coerce_mult(float(pg.get("decay_hygiene_mult", 1.0)) - mult_delta)
+            if "RIGHT" in ev:
+                pg["decay_hygiene_mult"] = _coerce_mult(float(pg.get("decay_hygiene_mult", 1.0)) + mult_delta)
+        elif sel == 5:
+            if "LEFT" in ev:
+                pg["decay_social_mult"] = _coerce_mult(float(pg.get("decay_social_mult", 1.0)) - mult_delta)
+            if "RIGHT" in ev:
+                pg["decay_social_mult"] = _coerce_mult(float(pg.get("decay_social_mult", 1.0)) + mult_delta)
+        elif sel == 6:
+            if "LEFT" in ev:
+                pg["decay_fun_mult"] = _coerce_mult(float(pg.get("decay_fun_mult", 1.0)) - mult_delta)
+            if "RIGHT" in ev:
+                pg["decay_fun_mult"] = _coerce_mult(float(pg.get("decay_fun_mult", 1.0)) + mult_delta)
+        elif sel == 7:
+            if "LEFT" in ev:
+                pg["decay_bladder_mult"] = _coerce_mult(float(pg.get("decay_bladder_mult", 1.0)) - mult_delta)
+            if "RIGHT" in ev:
+                pg["decay_bladder_mult"] = _coerce_mult(float(pg.get("decay_bladder_mult", 1.0)) + mult_delta)
+        elif sel == 8:
+            if "LEFT" in ev:
+                pg["hp_loss_mult"] = _coerce_mult(float(pg.get("hp_loss_mult", 1.0)) - mult_delta)
+            if "RIGHT" in ev:
+                pg["hp_loss_mult"] = _coerce_mult(float(pg.get("hp_loss_mult", 1.0)) + mult_delta)
+        elif sel == 9:
+            if "LEFT" in ev:
+                pg["hp_regen_mult"] = _coerce_mult(float(pg.get("hp_regen_mult", 1.0)) - mult_delta)
+            if "RIGHT" in ev:
+                pg["hp_regen_mult"] = _coerce_mult(float(pg.get("hp_regen_mult", 1.0)) + mult_delta)
+        elif sel == 10:
+            if "LEFT" in ev:
+                pg["brick_speed_mult"] = _coerce_mult(float(pg.get("brick_speed_mult", 1.0)) - mult_delta)
+            if "RIGHT" in ev:
+                pg["brick_speed_mult"] = _coerce_mult(float(pg.get("brick_speed_mult", 1.0)) + mult_delta)
+        elif sel == 11:
+            if "LEFT" in ev:
+                pg["memory_reveal_seconds"] = round(clamp(float(pg.get("memory_reveal_seconds", 1.1)) - 0.05, 0.3, 3.0), 2)
+            if "RIGHT" in ev:
+                pg["memory_reveal_seconds"] = round(clamp(float(pg.get("memory_reveal_seconds", 1.1)) + 0.05, 0.3, 3.0), 2)
+        elif sel == 12:
+            if "LEFT" in ev:
+                pg["runner_speed_mult"] = _coerce_mult(float(pg.get("runner_speed_mult", 1.0)) - mult_delta)
+            if "RIGHT" in ev:
+                pg["runner_speed_mult"] = _coerce_mult(float(pg.get("runner_speed_mult", 1.0)) + mult_delta)
+        elif sel == 13 and ("LEFT" in ev or "RIGHT" in ev or confirm):
+            pg["show_tutorial_next_open"] = not bool(pg.get("show_tutorial_next_open", False))
+        elif sel == 14 and confirm:
+            armed = bool(ctx.user.get("_pet_reset_arm", False))
+            if not armed:
+                ctx.user["_pet_reset_arm"] = True
+                _pet_set_note(ctx, "Press B1 again to reset pet state.", 2.6)
+            else:
+                ctx.user["_pet_reset_arm"] = False
+                if _reset_pet_state(ctx):
+                    _pet_set_note(ctx, "Pet state reset.", 2.2)
+                else:
+                    _pet_set_note(ctx, "Reset failed.", 2.2)
+        elif sel == 15 and confirm:
+            rel = _export_pet_snapshot(ctx, prefs)
+            _pet_set_note(ctx, f"Saved {rel}" if rel else "Snapshot failed.", 2.5)
+
+        prefs["pet_game"] = pg
+        ctx.user["_settings_pet_sel"] = sel
+        h = int(getattr(ctx.disp, "height", 240))
+        content_h = max(1, h - 66)
+        visible = max(1, int(content_h // max(1, ITEM_H + ITEM_GAP)))
+        scroll = int(ctx.user.get("_settings_pet_scroll", 0))
+        ctx.user["_settings_pet_scroll"] = _ensure_visible(sel, scroll, len(items), visible)
+
+        if ev:
+            _save_prefs(ctx)
         return False
 
     if mode == MODE_SHUTDOWN:
@@ -363,10 +684,7 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
     if sel == 0 and confirm:
         ctx.user["_settings_mode"] = MODE_HELP
 
-    elif sel == 1 and confirm:
-        ctx.user["_settings_mode"] = MODE_GALLERY
-
-    elif sel == 2:  # brightness
+    elif sel == 1:  # brightness
         if "LEFT" in ev:
             prefs["brightness"] = int(clamp(int(prefs.get("brightness", 60)) - BRIGHTNESS_STEP, 0, 100))
         if "RIGHT" in ev:
@@ -376,22 +694,31 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
         except Exception:
             pass
 
-    elif sel == 3:  # target fps
+    elif sel == 2 and confirm:
+        ctx.user["_settings_mode"] = MODE_SHUTDOWN
+
+    elif sel == 3 and confirm:
+        prefs["show_fps"] = not bool(prefs.get("show_fps", False))
+
+    elif sel == 4 and confirm:
+        ctx.user["_settings_mode"] = MODE_PET
+
+    elif sel == 5 and confirm:
+        ctx.user["_settings_mode"] = MODE_GALLERY
+
+    elif sel == 6:  # target fps
         if "LEFT" in ev:
             prefs["target_fps"] = int(clamp(int(prefs.get("target_fps", 15)) - 1, FPS_MIN, FPS_MAX))
         if "RIGHT" in ev:
             prefs["target_fps"] = int(clamp(int(prefs.get("target_fps", 15)) + 1, FPS_MIN, FPS_MAX))
 
-    elif sel == 4 and confirm:  # show fps
-        prefs["show_fps"] = not bool(prefs.get("show_fps", False))
+    elif sel == 7 and confirm:
+        ctx.user["_settings_mode"] = MODE_UPDATER_SOURCE
 
-    elif sel == 5 and confirm:
+    elif sel == 8 and confirm:
         ctx.user["_settings_mode"] = MODE_DEBUG
         ctx.user["_debug_scroll"] = 0
         ctx.user["_debug_cache"] = {"t": 0.0, "lines": []}
-
-    elif sel == 6 and confirm:
-        ctx.user["_settings_mode"] = MODE_SHUTDOWN
 
     ctx.user["_settings_sel"] = sel
 
@@ -599,6 +926,45 @@ def _render_gallery_settings(ctx, prefs: Dict) -> Image.Image:
     return img
 
 
+def _render_updater_source(ctx, prefs: Dict) -> Image.Image:
+    items = _updater_items(prefs)
+    sel = int(ctx.user.get("_settings_updater_sel", 0))
+
+    img = app_background(ctx, dim_alpha=112)
+    img, y0 = _draw_header(ctx, img, "Updater Source", "B2 Back")
+    img, rect = _draw_list_panel(ctx, img, y0)
+    img = _draw_menu_items(ctx, img, rect, items, sel, "_settings_updater_scroll")
+
+    d = ImageDraw.Draw(img)
+    x0, y0, x1, y1 = rect
+    line = "Order: selected source, then preset fallbacks."
+    tw = int(d.textlength(line, font=ctx.font_s))
+    d.text((max(x0 + 10, x1 - 10 - tw), y1 - 18), line, font=ctx.font_s, fill=(212, 192, 184))
+    return img
+
+
+def _render_pet_settings(ctx, prefs: Dict) -> Image.Image:
+    items = _pet_items(prefs)
+    sel = int(ctx.user.get("_settings_pet_sel", 0))
+
+    img = app_background(ctx, dim_alpha=112)
+    img, y0 = _draw_header(ctx, img, "Pet Game Settings", "B2 Back")
+    img, rect = _draw_list_panel(ctx, img, y0)
+    img = _draw_menu_items(ctx, img, rect, items, sel, "_settings_pet_scroll")
+
+    note = str(ctx.user.get("_pet_settings_note", "") or "")
+    if note:
+        d = ImageDraw.Draw(img)
+        x0, y0, x1, y1 = rect
+        nw = min((x1 - x0) - 18, int(d.textlength(note, font=ctx.font_s)) + 18)
+        nx0 = x0 + ((x1 - x0) - nw) // 2
+        ny0 = y1 - 24
+        d.rounded_rectangle([nx0, ny0, nx0 + nw, ny0 + 16], radius=6, fill=(10, 8, 10, 205), outline=(255, 220, 210, 90), width=1)
+        tx = nx0 + (nw - int(d.textlength(note, font=ctx.font_s))) // 2
+        d.text((tx, ny0 + 3), note, font=ctx.font_s, fill=(238, 228, 220))
+    return img
+
+
 def _render_list(ctx, prefs: Dict) -> Image.Image:
     items = _list_items(prefs)
     sel = int(ctx.user.get("_settings_sel", 0))
@@ -611,8 +977,8 @@ def _render_list(ctx, prefs: Dict) -> Image.Image:
     bright_frac = float(prefs.get("brightness", 60)) / 100.0
     fps_frac = (float(prefs.get("target_fps", 15)) - FPS_MIN) / float(FPS_MAX - FPS_MIN)
     mini_bars = {
-        2: bright_frac,
-        3: fps_frac,
+        1: bright_frac,
+        6: fps_frac,
     }
     img = _draw_menu_items(ctx, img, rect, items, sel, "_settings_scroll", mini_bars=mini_bars)
     return img
@@ -649,6 +1015,12 @@ def render(ctx) -> Image.Image:
 
     if mode == MODE_GALLERY:
         return _render_gallery_settings(ctx, prefs)
+
+    if mode == MODE_PET:
+        return _render_pet_settings(ctx, prefs)
+
+    if mode == MODE_UPDATER_SOURCE:
+        return _render_updater_source(ctx, prefs)
 
     if mode == MODE_DEBUG:
         return _render_debug(ctx, prefs)

@@ -49,7 +49,10 @@ PocketR/
   config.py                  # Driver configuration helpers
   ST7789.py                  # LCD HAT driver
   requirements.txt
-  pocketr_settings.json      # Runtime settings persisted by Settings app
+  .pocketr/                  # Local runtime data (desktop); Pi uses /root/.pocketr/
+    settings.json
+    pet/state.json
+    update/last_update.json
 
   game/
     main.py                  # PocketR OS shell: intro/home/app routing
@@ -80,7 +83,7 @@ Responsibilities:
 - Initialize ST7789 display + backlight.
 - Read GPIO button/joystick edges each frame.
 - Build a `Ctx` object passed to game modules.
-- Load and hot-apply settings from `pocketr_settings.json`:
+- Load and hot-apply settings from persistent `settings.json` (default path: `/root/.pocketr/settings.json`):
   - `brightness`
   - `target_fps`
 - Run the game module loop via `game.main` (`init/update/render`).
@@ -91,9 +94,10 @@ Important fields/methods used by apps:
 - `ctx.disp` display object
 - `ctx.inputs` edge + held input helper
 - `ctx.font_s`, `ctx.font_m`, `ctx.font_l`
-- `ctx.base_dir`, `ctx.game_dir`
+- `ctx.base_dir`, `ctx.game_dir`, `ctx.data_dir`
 - `ctx.user` persistent app/session state dictionary
 - `ctx.asset(*parts)` absolute path to `game/assets/...`
+- `ctx.data_path(*parts)` absolute path to persistent runtime files
 - `ctx.show(img)` draw image to LCD
 - `ctx.request_poweroff()` shutdown helper
 
@@ -163,11 +167,15 @@ Configured graph:
 Note: this mapping uses left for Arcade so all four directions are uniquely mapped.
 
 ### Room actions
-- Hall: `Check In`, `Stretch`
+- Hall: `Check In`, `Stretch`, `Save & Quit`
 - Bedroom: `Cuddle`, `Give Hug`, `Sleep`
-- Living Room: `Watch TV`, `Lounge`, `Talk`
-- Arcade: `Runner Dash`, `Puzzle Pop`, `Memory Match`
+- Living Room: `Watch TV`, `Lounge`, `Talk`, `Open Gallery`
+- Arcade: `Brick Breaker`, `Memory Match`, `Runner Dash`
 - Bathroom: `Use Toilet`, `Shower`
+
+### Arcade mini-games
+- Brick Breaker now has progressive levels (`L1` to `L3`) with increasing brick density/speed.
+- Mini-game play area renders on a full black gameplay canvas (not semi-opaque over room art).
 
 ### Talk system
 - Dialogue is loaded from `game/assets/pet_game/dialogue.json`.
@@ -191,8 +199,11 @@ These are placeholder art; replace with your own sprite sheets/assets as needed.
 ### Controls in pet game
 - Move: joystick directions (held)
 - Open action panel: `B1` or joystick `PRESS`
-- Confirm panel item: `B1` or `PRESS`
-- Close panel / back out: `B2`
+- Confirm panel item: `B1`
+- `B2` short: quick supportive interaction (or close panel)
+- `B2` long (~1.2s): reopen tutorial slides
+- `B3` short: quick care action
+- Global `B3` hold still performs OS shutdown
 
 ## 6.2) Gallery (`game/apps/blank.py`)
 
@@ -205,6 +216,7 @@ Features:
 - Slide animation timing from Settings
 - Auto-scroll timing from Settings
 - Optional filename overlay support
+- Updated panel/card UI to match current launcher style
 
 Controls vary slightly by mode:
 - `B2` exits (or leaves focus mode in grid)
@@ -215,16 +227,19 @@ Controls vary slightly by mode:
 
 Settings sections:
 - `Controls & Help`
-- `Gallery Settings`
 - `Brightness`
-- `Target FPS`
-- `Show FPS`
-- `Debug`
 - `Shutdown`
+- `Show FPS`
+- `Pet Game Settings`
+- `Gallery Settings`
+- `Target FPS`
+- `Source`
+- `Debug`
 
 ### Persistence
 Settings are saved to:
-- `pocketr_settings.json` (project root)
+- `/root/.pocketr/settings.json` (Pi default)
+- `./.pocketr/settings.json` fallback on desktop/dev machines
 
 ### Gallery settings keys
 - `gallery_mode`: `SLIDE` or `GRID`
@@ -336,7 +351,17 @@ Script behavior:
   - `git pull --rebase --autostash`
 - Outputs status for updater UI log tail.
 
-## 12) Configuration File Reference (`pocketr_settings.json`)
+Updater app behavior:
+- Uses `settings.json` source mode:
+  - `AUTO`: discover candidate repos automatically.
+  - `PRESET`: start from selected preset path, then fallback chain.
+- Execution order:
+  1. direct `git -C <repo> pull --rebase --autostash`
+  2. `game/scripts/update_repo.sh` fallback for the same repo
+  3. next candidate path in chain
+- Persists attempt history in `/root/.pocketr/update/last_update.json`.
+
+## 12) Configuration File Reference (`/root/.pocketr/settings.json`)
 
 Typical file:
 ```json
@@ -348,7 +373,25 @@ Typical file:
   "gallery_auto_scroll": true,
   "gallery_auto_seconds": 3.2,
   "gallery_swipe_seconds": 0.22,
-  "gallery_show_filename": true
+  "gallery_show_filename": true,
+  "updater_source_mode": "AUTO",
+  "updater_source_value": "/root/PocketR",
+  "pet_game": {
+    "sim_speed": 1.0,
+    "difficulty_profile": "normal",
+    "decay_hunger_mult": 1.0,
+    "decay_energy_mult": 1.0,
+    "decay_hygiene_mult": 1.0,
+    "decay_social_mult": 1.0,
+    "decay_fun_mult": 1.0,
+    "decay_bladder_mult": 1.0,
+    "hp_loss_mult": 1.0,
+    "hp_regen_mult": 1.0,
+    "brick_speed_mult": 1.0,
+    "memory_reveal_seconds": 1.1,
+    "runner_speed_mult": 1.0,
+    "show_tutorial_next_open": false
+  }
 }
 ```
 

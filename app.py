@@ -43,6 +43,7 @@ ACTIVE_HIGH = False       # Typical pull-up buttons: pressed=0
 FPS = 15                  # Default target FPS (can be changed in Settings)
 BACKLIGHT = 60            # Default backlight 0-100 (can be changed in Settings)
 SHUTDOWN_HOLD_SECONDS = 3.0
+SHUTDOWN_OVERLAY_DELAY = 0.45
 
 DEFAULT_DATA_DIR = "/root/.pocketr"
 LEGACY_SETTINGS_FILE = "pocketr_settings.json"
@@ -326,7 +327,7 @@ def run_engine(game_mod, ctx: Ctx):
             if held >= SHUTDOWN_HOLD_SECONDS:
                 ctx.request_poweroff()
 
-            ctx.user["shutdown_holding"] = True
+            ctx.user["shutdown_holding"] = held >= SHUTDOWN_OVERLAY_DELAY
             ctx.user["shutdown_hold_seconds"] = held
         else:
             ctx.user["shutdown_holding"] = False

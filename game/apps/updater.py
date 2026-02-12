@@ -19,8 +19,27 @@ from ..ui_common import (
 
 
 LOG_PATH = "/tmp/pocketr_update.log"
-REPO_SCAN_SECONDS = 1.5
 META_REL_PATH = "update/last_update.json"
+REPO_SCAN_SECONDS = 1.5
+
+SOURCE_AUTO = "AUTO"
+SOURCE_PRESET = "PRESET"
+
+STAGE_CONFIRM = "CONFIRM"
+STAGE_REVIEW = "REVIEW_METHOD"
+STAGE_RUNNING = "RUNNING"
+STAGE_DONE = "DONE"
+STAGE_ERROR = "ERROR"
+
+METHOD_DIRECT = "DIRECT_GIT"
+METHOD_SCRIPT = "SCRIPT_FALLBACK"
+
+UPDATER_PRESETS = [
+    "/root/PocketR",
+    "/root/pocketr",
+    "/home/pi/PocketR",
+    "/home/pi/pocketr",
+]
 
 
 def _run(cmd: List[str], timeout: float = 1.0) -> str:
@@ -31,6 +50,13 @@ def _run(cmd: List[str], timeout: float = 1.0) -> str:
         return ""
 
 
+def _is_git_repo(path: str) -> bool:
+    if not path:
+        return False
+    out = _run(["git", "-C", path, "rev-parse", "--is-inside-work-tree"], timeout=0.8)
+    return out.strip() == "true"
+
+
 def _git_root(path: str) -> str:
     if not path:
         return ""
@@ -39,11 +65,24 @@ def _git_root(path: str) -> str:
     return p if p and os.path.isdir(p) else ""
 
 
-def _is_git_repo(path: str) -> bool:
-    if not path:
-        return False
-    out = _run(["git", "-C", path, "rev-parse", "--is-inside-work-tree"], timeout=0.8)
-    return out.strip() == "true"
+def _git_branch(path: str) -> str:
+    return _run(["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"], timeout=1.0) or "unknown"
+
+
+def _git_sha(path: str) -> str:
+    return _run(["git", "-C", path, "rev-parse", "--short", "HEAD"], timeout=1.0) or ""
+
+
+def _safe_directory(path: str) -> None:
+    try:
+        subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.2,
+        )
+    except Exception:
+        pass
 
 
 def _tail(path: str, n: int = 10) -> List[str]:
@@ -63,81 +102,64 @@ def _read_all_lines(path: str) -> List[str]:
         return []
 
 
-def _reboot():
-    try:
-        os.sync()
-    except Exception:
-        pass
+def _parse_markers(path: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for raw in _read_all_lines(path):
+        line = str(raw).strip()
+        if not line.startswith("POCKETR_META_"):
+            continue
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
 
-    for cmd in (
-        ["/usr/bin/systemctl", "reboot"],
-        ["/usr/bin/sudo", "/usr/bin/systemctl", "reboot"],
-        ["/sbin/reboot"],
-        ["reboot"],
-    ):
-        try:
-            subprocess.Popen(cmd)
-            return
-        except Exception:
-            pass
+
+def _unique_paths(paths: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for raw in paths:
+        p = os.path.abspath(os.path.expanduser(str(raw or "").strip()))
+        if not p:
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
 
 
 def _repo_candidates(ctx) -> List[str]:
     base = str(getattr(ctx, "base_dir", "") or "")
     game_dir = str(getattr(ctx, "game_dir", "") or "")
     cwd = os.getcwd()
-
     raw: List[str] = [
         os.environ.get("POCKETR_REPO", ""),
-        "/root/PocketR",
-        "/root/pocketr",
         base,
         os.path.dirname(game_dir) if game_dir else "",
         cwd,
-        "/home/pi/PocketR",
-        "/home/pi/pocketr",
-        "/home/pizero/PocketR",
-        "/home/pizero/pocketr",
-        "/home/pizero2/PocketR",
         "/opt/pocketr",
-    ]
+    ] + UPDATER_PRESETS
 
     out: List[str] = []
-    seen = set()
-
-    for p in raw:
-        if not p:
-            continue
-        p = os.path.abspath(os.path.expanduser(p))
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-
-        child = os.path.join(p, "PocketR")
-        if child not in seen:
-            seen.add(child)
-            out.append(child)
-
-    return out
+    for p in _unique_paths(raw):
+        out.append(p)
+        out.append(os.path.join(p, "PocketR"))
+    return _unique_paths(out)
 
 
 def _discover_repo(ctx) -> Tuple[str, List[str]]:
     checked: List[str] = []
-
     for cand in _repo_candidates(ctx):
         if cand not in checked:
             checked.append(cand)
-
         if not os.path.isdir(cand):
             continue
-
         root = _git_root(cand)
         if root and _is_git_repo(root):
             return root, checked
-
         if _is_git_repo(cand):
             return cand, checked
-
     return "", checked
 
 
@@ -156,6 +178,31 @@ def _discover_repo_cached(ctx) -> Tuple[str, List[str]]:
     return repo, checked
 
 
+def _updater_source_prefs(ctx) -> Tuple[str, str]:
+    prefs = ctx.user.get("_prefs", {})
+    if not isinstance(prefs, dict):
+        prefs = read_json(ctx, "settings.json", {})
+        if not isinstance(prefs, dict):
+            prefs = {}
+
+    mode = str(prefs.get("updater_source_mode", SOURCE_AUTO) or SOURCE_AUTO).strip().upper()
+    if mode != SOURCE_PRESET:
+        mode = SOURCE_AUTO
+    value = str(prefs.get("updater_source_value", UPDATER_PRESETS[0]) or UPDATER_PRESETS[0]).strip()
+    return mode, value
+
+
+def _build_candidate_chain(ctx) -> List[str]:
+    mode, value = _updater_source_prefs(ctx)
+    _repo, checked = _discover_repo_cached(ctx)
+    checked_paths = _unique_paths([p for p in checked if os.path.isdir(p)])
+    auto = _unique_paths(checked_paths + _repo_candidates(ctx))
+
+    if mode == SOURCE_PRESET:
+        return _unique_paths([value] + UPDATER_PRESETS + auto)
+    return _unique_paths(auto + UPDATER_PRESETS)
+
+
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -170,6 +217,11 @@ def _last_update_default() -> Dict:
         "branch": "",
         "pre_sha": "",
         "post_sha": "",
+        "selected_mode": SOURCE_AUTO,
+        "selected_value": "",
+        "attempted_paths": [],
+        "attempts": [],
+        "method_used": "",
     }
 
 
@@ -192,29 +244,43 @@ def _save_last_update(ctx, data: Dict) -> None:
         pass
 
 
-def _parse_markers(path: str) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for raw in _read_all_lines(path):
-        line = str(raw).strip()
-        if not line.startswith("POCKETR_META_"):
-            continue
-        if "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        out[k.strip()] = v.strip()
-    return out
+def _reboot():
+    try:
+        os.sync()
+    except Exception:
+        pass
+
+    for cmd in (
+        ["/usr/bin/systemctl", "reboot"],
+        ["/usr/bin/sudo", "/usr/bin/systemctl", "reboot"],
+        ["/sbin/reboot"],
+        ["reboot"],
+    ):
+        try:
+            subprocess.Popen(cmd)
+            return
+        except Exception:
+            pass
 
 
 def _state(ctx) -> Dict:
     st = ctx.user.get("_updater", None)
     if not isinstance(st, dict):
         st = {}
-    st.setdefault("stage", "CONFIRM")  # CONFIRM / RUNNING / DONE / ERROR
+    st.setdefault("stage", STAGE_CONFIRM)
     st.setdefault("msg", "")
     st.setdefault("reboot_at", 0.0)
-    st.setdefault("repo", "")
-    st.setdefault("checked", [])
     st.setdefault("last", _load_last_update(ctx))
+    st.setdefault("selected_mode", SOURCE_AUTO)
+    st.setdefault("selected_value", "")
+    st.setdefault("candidates", [])
+    st.setdefault("attempt_idx", 0)
+    st.setdefault("attempt_method", METHOD_DIRECT)
+    st.setdefault("attempts", [])
+    st.setdefault("current_repo", "")
+    st.setdefault("current_branch", "")
+    st.setdefault("current_pre_sha", "")
+    st.setdefault("method_used", "")
     ctx.user["_updater"] = st
     return st
 
@@ -224,140 +290,270 @@ def init(ctx):
     if str(last.get("status", "never") or "never") == "never":
         _save_last_update(ctx, last)
     ctx.user["_updater"] = {
-        "stage": "CONFIRM",
+        "stage": STAGE_CONFIRM,
         "msg": "",
         "reboot_at": 0.0,
-        "repo": "",
-        "checked": [],
         "last": last,
+        "selected_mode": SOURCE_AUTO,
+        "selected_value": "",
+        "candidates": [],
+        "attempt_idx": 0,
+        "attempt_method": METHOD_DIRECT,
+        "attempts": [],
+        "current_repo": "",
+        "current_branch": "",
+        "current_pre_sha": "",
+        "method_used": "",
     }
     ctx.user["_updater_repo_cache"] = {"t": 0.0, "repo": "", "checked": []}
 
 
-def _record_update_result(ctx, repo_root: str, status: str, rc, msg: str) -> Dict:
-    meta = _load_last_update(ctx)
-    markers = _parse_markers(LOG_PATH)
-
-    meta["last_run"] = _now_iso()
-    meta["repo_path"] = repo_root
-    meta["status"] = status
-    meta["return_code"] = rc
-    meta["message"] = msg
-    meta["branch"] = markers.get("POCKETR_META_BRANCH", meta.get("branch", ""))
-    meta["pre_sha"] = markers.get("POCKETR_META_PRE_SHA", meta.get("pre_sha", ""))
-    meta["post_sha"] = markers.get("POCKETR_META_POST_SHA", meta.get("post_sha", ""))
-
-    _save_last_update(ctx, meta)
-    return meta
+def _record_attempt(st: Dict, repo: str, method: str, status: str, rc: int, branch: str, pre_sha: str, post_sha: str) -> None:
+    st["attempts"].append(
+        {
+            "repo_path": repo,
+            "method": method,
+            "status": status,
+            "return_code": rc,
+            "branch": branch,
+            "pre_sha": pre_sha,
+            "post_sha": post_sha,
+            "at": _now_iso(),
+        }
+    )
 
 
-def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
-    st = _state(ctx)
-    stage = st.get("stage", "CONFIRM")
-    confirm = ("K1" in ev) or ("PRESS" in ev)
+def _persist_running(ctx, st: Dict) -> None:
+    _save_last_update(
+        ctx,
+        {
+            "last_run": _now_iso(),
+            "repo_path": str(st.get("current_repo", "") or ""),
+            "status": "running",
+            "return_code": None,
+            "message": "update in progress",
+            "selected_mode": st.get("selected_mode", SOURCE_AUTO),
+            "selected_value": st.get("selected_value", ""),
+            "attempted_paths": [a.get("repo_path", "") for a in st.get("attempts", [])],
+            "attempts": st.get("attempts", []),
+            "method_used": st.get("attempt_method", ""),
+        },
+    )
 
-    if stage in ("CONFIRM", "ERROR") and "K2" in ev:
-        return True
 
-    if stage == "CONFIRM":
-        repo_root, checked = _discover_repo_cached(ctx)
-        st["repo"] = repo_root
-        st["checked"] = checked[-8:]
+def _launch_attempt(ctx, st: Dict) -> bool:
+    candidates = st.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
 
-        if confirm:
-            if not repo_root or not _is_git_repo(repo_root):
-                st["stage"] = "ERROR"
-                st["msg"] = (
-                    "Update source not found."
-                    "\nMake sure PocketR is installed as a git clone."
-                    "\nIf needed, reinstall from GitHub."
-                )
-                return False
+    while int(st.get("attempt_idx", 0)) < len(candidates):
+        idx = int(st.get("attempt_idx", 0))
+        method = str(st.get("attempt_method", METHOD_DIRECT) or METHOD_DIRECT)
+        repo = str(candidates[idx] or "")
+        if not os.path.isdir(repo) or not _is_git_repo(repo):
+            _record_attempt(st, repo, method, "failed", 2, "", "", "")
+            st["attempt_method"] = METHOD_DIRECT
+            st["attempt_idx"] = idx + 1
+            continue
 
+        st["current_repo"] = repo
+        st["current_branch"] = _git_branch(repo)
+        st["current_pre_sha"] = _git_sha(repo)
+        _safe_directory(repo)
+
+        try:
             try:
-                try:
-                    with open(LOG_PATH, "w", encoding="utf-8"):
-                        pass
-                except Exception:
+                with open(LOG_PATH, "w", encoding="utf-8"):
                     pass
+            except Exception:
+                pass
+            log_f = open(LOG_PATH, "a", encoding="utf-8")
+            env = os.environ.copy()
+            env["POCKETR_REPO"] = repo
 
-                script_path = os.path.join(ctx.game_dir, "scripts", "update_repo.sh")
-                log_f = open(LOG_PATH, "a", encoding="utf-8")
-                env = os.environ.copy()
-                env["POCKETR_REPO"] = repo_root
-
+            if method == METHOD_DIRECT:
                 proc = subprocess.Popen(
-                    ["bash", script_path, repo_root],
+                    ["git", "-C", repo, "pull", "--rebase", "--autostash"],
                     stdout=log_f,
                     stderr=subprocess.STDOUT,
                     env=env,
                 )
-                ctx.user["_updater_proc"] = proc
-                ctx.user["_updater_logf"] = log_f
+            else:
+                script_path = os.path.join(ctx.game_dir, "scripts", "update_repo.sh")
+                proc = subprocess.Popen(
+                    ["bash", script_path, repo],
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                )
 
-                # Store running state to survive restarts with last known context.
-                running = {
-                    "last_run": _now_iso(),
-                    "repo_path": repo_root,
-                    "status": "running",
-                    "return_code": None,
-                    "message": "update in progress",
-                }
-                _save_last_update(ctx, running)
-                st["last"] = _load_last_update(ctx)
+            ctx.user["_updater_proc"] = proc
+            ctx.user["_updater_logf"] = log_f
+            st["msg"] = f"Updating with {method.lower().replace('_', ' ')}..."
+            _persist_running(ctx, st)
+            return True
+        except Exception as e:
+            _record_attempt(st, repo, method, "failed", 3, st.get("current_branch", ""), st.get("current_pre_sha", ""), "")
+            st["msg"] = f"Start failed: {e}"
+            if method == METHOD_DIRECT:
+                st["attempt_method"] = METHOD_SCRIPT
+            else:
+                st["attempt_method"] = METHOD_DIRECT
+                st["attempt_idx"] = idx + 1
+            continue
 
-                st["stage"] = "RUNNING"
-                st["msg"] = "Updating from git..."
-            except Exception as e:
-                st["stage"] = "ERROR"
-                st["msg"] = f"Failed to start update: {e}"
+    return False
+
+
+def _persist_result(ctx, st: Dict, status: str, rc: int, msg: str, method_used: str = "") -> Dict:
+    mode = st.get("selected_mode", SOURCE_AUTO)
+    value = st.get("selected_value", "")
+    attempts = st.get("attempts", [])
+    if not isinstance(attempts, list):
+        attempts = []
+    attempted_paths = [str(a.get("repo_path", "") or "") for a in attempts]
+
+    branch = ""
+    pre_sha = ""
+    post_sha = ""
+    for a in reversed(attempts):
+        if a.get("status") == "ok":
+            branch = str(a.get("branch", "") or "")
+            pre_sha = str(a.get("pre_sha", "") or "")
+            post_sha = str(a.get("post_sha", "") or "")
+            break
+
+    if method_used == METHOD_SCRIPT:
+        markers = _parse_markers(LOG_PATH)
+        branch = markers.get("POCKETR_META_BRANCH", branch)
+        pre_sha = markers.get("POCKETR_META_PRE_SHA", pre_sha)
+        post_sha = markers.get("POCKETR_META_POST_SHA", post_sha)
+
+    last_repo = str(st.get("current_repo", "") or "")
+    payload = {
+        "last_run": _now_iso(),
+        "repo_path": last_repo,
+        "status": status,
+        "return_code": rc,
+        "message": msg,
+        "branch": branch,
+        "pre_sha": pre_sha,
+        "post_sha": post_sha,
+        "selected_mode": mode,
+        "selected_value": value,
+        "attempted_paths": attempted_paths,
+        "attempts": attempts,
+        "method_used": method_used,
+    }
+    _save_last_update(ctx, payload)
+    return payload
+
+
+def _close_proc_log(ctx) -> None:
+    try:
+        log_f = ctx.user.pop("_updater_logf", None)
+        if log_f:
+            log_f.close()
+    except Exception:
+        pass
+
+
+def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
+    st = _state(ctx)
+    stage = str(st.get("stage", STAGE_CONFIRM))
+    confirm = ("K1" in ev) or ("PRESS" in ev)
+
+    if stage in (STAGE_CONFIRM, STAGE_ERROR) and "K2" in ev:
+        return True
+
+    if stage == STAGE_CONFIRM:
+        mode, value = _updater_source_prefs(ctx)
+        st["selected_mode"] = mode
+        st["selected_value"] = value
+        st["candidates"] = _build_candidate_chain(ctx)
+        if confirm:
+            st["stage"] = STAGE_REVIEW
         return False
 
-    if stage == "RUNNING":
+    if stage == STAGE_REVIEW:
+        if "K2" in ev:
+            st["stage"] = STAGE_CONFIRM
+            return False
+        if confirm:
+            st["attempt_idx"] = 0
+            st["attempt_method"] = METHOD_DIRECT
+            st["attempts"] = []
+            st["current_repo"] = ""
+            st["current_branch"] = ""
+            st["current_pre_sha"] = ""
+            if _launch_attempt(ctx, st):
+                st["stage"] = STAGE_RUNNING
+            else:
+                st["stage"] = STAGE_ERROR
+                st["msg"] = "No valid git source found in candidate list."
+                st["last"] = _persist_result(ctx, st, "failed", 2, st["msg"], "")
+        return False
+
+    if stage == STAGE_RUNNING:
         proc = ctx.user.get("_updater_proc", None)
         if proc is None:
-            st["stage"] = "ERROR"
-            st["msg"] = "Update process missing"
+            st["stage"] = STAGE_ERROR
+            st["msg"] = "Update process missing."
+            st["last"] = _persist_result(ctx, st, "failed", 3, st["msg"], "")
             return False
 
         rc = proc.poll()
         if rc is None:
             return False
 
-        try:
-            log_f = ctx.user.pop("_updater_logf", None)
-            if log_f:
-                log_f.close()
-        except Exception:
-            pass
+        _close_proc_log(ctx)
+        ctx.user.pop("_updater_proc", None)
 
-        repo_root = str(st.get("repo", "") or "")
+        repo = str(st.get("current_repo", "") or "")
+        method = str(st.get("attempt_method", METHOD_DIRECT) or METHOD_DIRECT)
+        branch = str(st.get("current_branch", "") or "")
+        pre_sha = str(st.get("current_pre_sha", "") or "")
+        post_sha = _git_sha(repo) if repo else ""
 
         if rc == 0:
-            st["stage"] = "DONE"
+            _record_attempt(st, repo, method, "ok", 0, branch, pre_sha, post_sha)
+            st["method_used"] = method
+            st["stage"] = STAGE_DONE
             st["msg"] = "Update complete. Rebooting..."
             st["reboot_at"] = time.time() + 2.0
-            st["last"] = _record_update_result(ctx, repo_root, "ok", 0, "update complete")
+            st["last"] = _persist_result(ctx, st, "ok", 0, "update complete", method)
+            return False
+
+        _record_attempt(st, repo, method, "failed", int(rc), branch, pre_sha, post_sha)
+        idx = int(st.get("attempt_idx", 0))
+        if method == METHOD_DIRECT:
+            st["attempt_method"] = METHOD_SCRIPT
         else:
-            st["stage"] = "ERROR"
-            st["msg"] = f"Update failed (code {rc})."
-            st["last"] = _record_update_result(ctx, repo_root, "failed", int(rc), st["msg"])
+            st["attempt_method"] = METHOD_DIRECT
+            st["attempt_idx"] = idx + 1
+
+        if _launch_attempt(ctx, st):
+            return False
+
+        st["stage"] = STAGE_ERROR
+        st["msg"] = "All update sources failed."
+        st["last"] = _persist_result(ctx, st, "failed", int(rc), st["msg"], "")
         return False
 
-    if stage == "DONE":
+    if stage == STAGE_DONE:
         if time.time() >= float(st.get("reboot_at", 0.0)):
             _reboot()
         return False
 
-    if stage == "ERROR":
+    if stage == STAGE_ERROR:
         if confirm:
-            st["stage"] = "CONFIRM"
+            st["stage"] = STAGE_CONFIRM
             st["msg"] = ""
             st["last"] = _load_last_update(ctx)
             ctx.user["_updater_repo_cache"] = {"t": 0.0, "repo": "", "checked": []}
         return False
 
-    st["stage"] = "CONFIRM"
+    st["stage"] = STAGE_CONFIRM
     return False
 
 
@@ -412,13 +608,18 @@ def _fmt_last_update(last: Dict) -> str:
 
 def render(ctx) -> Image.Image:
     st = _state(ctx)
-    stage = st.get("stage", "CONFIRM")
+    stage = str(st.get("stage", STAGE_CONFIRM))
     last = st.get("last", _load_last_update(ctx))
+    candidates = st.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
 
     img = app_background(ctx, dim_alpha=112)
-    if stage in ("CONFIRM", "ERROR"):
+    if stage in (STAGE_CONFIRM, STAGE_ERROR):
         right = "B2 Back"
-    elif stage == "RUNNING":
+    elif stage == STAGE_REVIEW:
+        right = "B2 Cancel"
+    elif stage == STAGE_RUNNING:
         right = "Updating"
     else:
         right = "Rebooting"
@@ -430,10 +631,10 @@ def render(ctx) -> Image.Image:
     ty = y0 + 12
     tw = (x1 - x0) - 24
 
-    if stage == "CONFIRM":
+    if stage == STAGE_CONFIRM:
         ty = _draw_wrapped_lines(
             d,
-            "This will pull the latest PocketR code and reboot when complete.",
+            "This will pull latest PocketR code and reboot when complete.",
             tx,
             ty,
             tw,
@@ -452,32 +653,52 @@ def render(ctx) -> Image.Image:
             (240, 220, 210),
             line_h=15,
         )
-        ty += 3
+        ty += 5
+        _draw_wrapped_lines(d, "B1/PRESS: review method\nB2: cancel", tx, ty, tw, ctx.font_s, (240, 220, 210), line_h=15)
+        foot = _fmt_last_update(last)
+        d.text((tx, y1 - 18), foot, font=ctx.font_s, fill=(214, 194, 186))
+        return img
 
-        _draw_wrapped_lines(
+    if stage == STAGE_REVIEW:
+        mode = str(st.get("selected_mode", SOURCE_AUTO) or SOURCE_AUTO)
+        source_line = f"Source mode: {mode}"
+        ty = _draw_wrapped_lines(d, source_line, tx, ty, tw, ctx.font_s, (240, 220, 210), line_h=15)
+        ty = _draw_wrapped_lines(
             d,
-            "B1/PRESS: start update\nB2: cancel",
+            "Method 1: git -C <repo> pull --rebase --autostash\nMethod 2: update_repo.sh fallback",
             tx,
-            ty,
+            ty + 2,
             tw,
             ctx.font_s,
             (240, 220, 210),
             line_h=15,
         )
-
-        foot = _fmt_last_update(last)
-        d.text((tx, y1 - 18), foot, font=ctx.font_s, fill=(214, 194, 186))
+        ty += 3
+        _draw_wrapped_lines(d, "Candidate order:", tx, ty, tw, ctx.font_s, (236, 216, 208), line_h=15)
+        y = ty + 14
+        for p in candidates[:4]:
+            line = f"- {p}"
+            for wline in wrap_text(d, line, ctx.font_s, max_width=tw):
+                if y > y1 - 30:
+                    break
+                d.text((tx, y), wline, font=ctx.font_s, fill=(222, 204, 196))
+                y += 14
+            if y > y1 - 30:
+                break
+        d.text((tx, y1 - 18), "B1/PRESS: start  B2: back", font=ctx.font_s, fill=(214, 194, 186))
         return img
 
-    if stage == "RUNNING":
-        msg = st.get("msg", "Updating...") + dots(time.time())
-        ty = _draw_wrapped_lines(d, msg, tx, ty, tw, ctx.font_m, (242, 232, 226), line_h=18)
+    if stage == STAGE_RUNNING:
+        method = str(st.get("attempt_method", METHOD_DIRECT)).replace("_", " ").lower()
+        repo = str(st.get("current_repo", "") or "")
+        title = f"{method}: {os.path.basename(repo) or repo}"
+        ty = _draw_wrapped_lines(d, title + dots(time.time()), tx, ty, tw, ctx.font_m, (242, 232, 226), line_h=18)
 
         frac = 0.15 + 0.70 * breathe(time.time(), 1.6)
         draw_progress_bar(d, tx, ty + 4, tw, 12, frac)
 
         y = ty + 24
-        for raw in _tail(LOG_PATH, n=12):
+        for raw in _tail(LOG_PATH, n=10):
             for line in wrap_text(d, raw, ctx.font_s, max_width=tw):
                 if y > y1 - 18:
                     break
@@ -487,12 +708,12 @@ def render(ctx) -> Image.Image:
                 break
         return img
 
-    if stage == "DONE":
+    if stage == STAGE_DONE:
         ty = _draw_wrapped_lines(d, st.get("msg", "Rebooting..."), tx, ty, tw, ctx.font_m, (242, 232, 226), line_h=18)
         ty += 6
         _draw_wrapped_lines(
             d,
-            "If reboot does not start, use the hardware power switch.",
+            "If reboot does not start, use hardware power switch.",
             tx,
             ty,
             tw,
@@ -503,13 +724,12 @@ def render(ctx) -> Image.Image:
         draw_progress_bar(d, tx, y1 - 22, tw, 10, 1.0)
         return img
 
-    if stage == "ERROR":
+    if stage == STAGE_ERROR:
         d.text((tx, ty), "Update error", font=ctx.font_m, fill=(255, 120, 120))
         ty += 20
         ty = _draw_wrapped_lines(d, st.get("msg", "Unknown update error"), tx, ty, tw, ctx.font_s, (240, 220, 210), line_h=16)
-
         y = ty + 6
-        for raw in _tail(LOG_PATH, n=8):
+        for raw in _tail(LOG_PATH, n=6):
             for line in wrap_text(d, raw, ctx.font_s, max_width=tw):
                 if y > y1 - 20:
                     break
@@ -517,7 +737,7 @@ def render(ctx) -> Image.Image:
                 y += 15
             if y > y1 - 20:
                 break
-
+        d.text((tx, y1 - 18), "B1 retry  B2 back", font=ctx.font_s, fill=(214, 194, 186))
         return img
 
     return img
