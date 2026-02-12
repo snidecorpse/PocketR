@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="${1:-}"
+REPO_DIR="${1:-${POCKETR_REPO:-}}"
 if [[ -z "$REPO_DIR" ]]; then
-  echo "ERROR: missing repo_dir argument" >&2
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for CAND in "/root/PocketR" "/root/pocketr" "$(cd "$SCRIPT_DIR/../.." && pwd)"; do
+    if [[ -d "$CAND" ]]; then
+      REPO_DIR="$CAND"
+      break
+    fi
+  done
+fi
+
+if [[ -z "$REPO_DIR" ]]; then
+  echo "ERROR: missing repo_dir and no default repo found" >&2
   exit 2
 fi
 
@@ -36,8 +46,15 @@ fi
 git config --global --add safe.directory "$REPO_DIR" >/dev/null 2>&1 || true
 
 echo "[Pocket-R] repo: $REPO_DIR"
+BRANCH="$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+PRE_SHA="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+echo "POCKETR_META_BRANCH=${BRANCH:-unknown}"
+echo "POCKETR_META_PRE_SHA=${PRE_SHA:-unknown}"
+
 echo "[Pocket-R] git pull..."
 git -C "$REPO_DIR" pull --rebase --autostash
 
+POST_SHA="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+echo "POCKETR_META_POST_SHA=${POST_SHA:-unknown}"
 echo "[Pocket-R] update ok"
 sync

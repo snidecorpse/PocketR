@@ -8,6 +8,7 @@ from typing import Dict, Optional
 from PIL import Image, ImageDraw
 
 from .ui_common import (
+    app_background,
     breathe,
     dots,
     ease_in_out,
@@ -122,6 +123,74 @@ def _get_app_module(idx: int):
     return importlib.import_module(mod_name)
 
 
+def _square_point(x0: int, y0: int, x1: int, y1: int, dist: float):
+    """Point along a rectangle perimeter, clockwise from top-left."""
+    top = max(1.0, float(x1 - x0))
+    side = max(1.0, float(y1 - y0))
+    perim = 2.0 * (top + side)
+    d = dist % perim
+
+    if d < top:
+        return (x0 + d, y0)
+    d -= top
+    if d < side:
+        return (x1, y0 + d)
+    d -= side
+    if d < top:
+        return (x1 - d, y1)
+    d -= top
+    return (x0, y1 - d)
+
+
+def _draw_square_intro_ring(base: Image.Image, t: float, pad: int) -> Image.Image:
+    w, h = base.size
+    x0, y0 = pad, pad
+    x1, y1 = w - pad - 1, h - pad - 1
+
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(overlay)
+
+    pulse = breathe(t, 1.25)
+
+    # Thicker outward pulsing glow near screen edges.
+    for i, grow in enumerate((8, 5, 3, 1, 0)):
+        alpha = int((30 + 75 * pulse) * (1.0 - (i * 0.16)))
+        width = max(1, 5 - i)
+        d.rounded_rectangle(
+            [x0 - grow, y0 - grow, x1 + grow, y1 + grow],
+            radius=max(10, 24 + grow),
+            outline=(255, 235, 215, max(18, alpha)),
+            width=width,
+        )
+
+    top = max(1.0, float(x1 - x0))
+    side = max(1.0, float(y1 - y0))
+    perim = 2.0 * (top + side)
+
+    head = (t * 260.0) % perim
+    trail = perim * 0.40
+
+    outer_w = max(10, w // 18)
+    inner_w = max(5, outer_w - 5)
+    steps = 120
+
+    for i in range(steps):
+        f0 = i / float(steps)
+        f1 = (i + 1) / float(steps)
+
+        p0 = _square_point(x0, y0, x1, y1, head - (trail * f0))
+        p1 = _square_point(x0, y0, x1, y1, head - (trail * f1))
+        strength = 1.0 - f0
+
+        a_outer = int((50 + 80 * pulse) * strength)
+        a_inner = int((95 + 125 * pulse) * strength)
+
+        d.line([p0, p1], fill=(255, 210, 170, max(6, a_outer)), width=outer_w)
+        d.line([p0, p1], fill=(255, 245, 230, max(8, a_inner)), width=inner_w)
+
+    return Image.alpha_composite(base, overlay)
+
+
 
 def update(ctx, dt: float, ev: Dict[str, bool]):
     _load_assets(ctx)
@@ -230,17 +299,9 @@ def render(ctx) -> Image.Image:
         fade_in = ease_in_out(min(1.0, t / max(0.001, INTRO_FADE_IN_SECONDS)))
         base = fade_from_black(assets.intro, fade_in).convert("RGBA")
 
-        # Loading ring (glow around rim)
-        ring = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        rd = ImageDraw.Draw(ring)
-        pad = max(6, w // 30)
-        bbox = [pad, pad, w - pad - 1, h - pad - 1]
-        ang = (t * 140.0) % 360.0
-        span = 260.0
-        glow = int(120 + 90 * breathe(t, 2.2))
-        rd.ellipse(bbox, outline=(255, 255, 255, 40), width=4)
-        rd.arc(bbox, start=ang, end=ang + span, fill=(255, 255, 255, glow), width=6)
-        base = Image.alpha_composite(base, ring)
+        # Loading ring: square perimeter glow sweep
+        pad = max(3, w // 70)
+        base = _draw_square_intro_ring(base, t, pad)
 
         # Fade-out to HOME
         if mode == MODE_INTRO_OUT:
@@ -253,23 +314,30 @@ def render(ctx) -> Image.Image:
 
         held = float(ctx.user.get("_k3_held", 0.0))
         if held > 0:
-            img = overlay_hold_progress(img, "Hold K3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
+            img = overlay_hold_progress(img, "Hold B3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
         return img
 
     # HOME
     if mode == MODE_HOME:
-        img = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+        img = app_background(ctx, dim_alpha=116).convert("RGBA")
         d = ImageDraw.Draw(img)
 
         pad, cell, icon_sz, top = _layout(w, h)
         sel = int(ctx.user.get("os_selected", 0))
+        now = time.time()
 
         for i in range(4):
             r, c = divmod(i, 2)
             x = pad + c * (cell + pad)
             y = top + pad + r * (cell + pad)
 
-            d.rectangle([x, y, x + cell, y + cell], outline=(70, 70, 70, 255), width=2)
+            d.rounded_rectangle(
+                [x, y, x + cell, y + cell],
+                radius=max(6, cell // 14),
+                fill=(10, 10, 14, 138),
+                outline=(245, 220, 210, 70),
+                width=2,
+            )
 
             icon = assets.icons.get(i)
             if icon is not None:
@@ -278,7 +346,23 @@ def render(ctx) -> Image.Image:
                 img.paste(icon, (ix, iy), icon)
 
             if i == sel:
-                d.rectangle([x - 2, y - 2, x + cell + 2, y + cell + 2], outline=(255, 255, 255, 255), width=3)
+                pulse = breathe(now, 4.8)
+                glow = int(65 + 140 * pulse)
+                w_outer = 3 + int(2 * pulse)
+                w_inner = 2 + int(1 * pulse)
+                rad = max(8, cell // 12)
+                d.rounded_rectangle(
+                    [x - 7, y - 7, x + cell + 7, y + cell + 7],
+                    radius=rad + 2,
+                    outline=(255, 230, 210, max(32, glow - 40)),
+                    width=w_outer,
+                )
+                d.rounded_rectangle(
+                    [x - 3, y - 3, x + cell + 3, y + cell + 3],
+                    radius=rad,
+                    outline=(255, 245, 235, glow),
+                    width=w_inner,
+                )
 
         out = img.convert("RGB")
 
@@ -294,7 +378,7 @@ def render(ctx) -> Image.Image:
                 ctx.user["_home_t0"] = None
         held = float(ctx.user.get("_k3_held", 0.0))
         if held > 0:
-            out = overlay_hold_progress(out, "Hold K3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
+            out = overlay_hold_progress(out, "Hold B3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
         return out
 
     # APP
@@ -309,7 +393,7 @@ def render(ctx) -> Image.Image:
             img = Image.new("RGB", (w, h), (0, 0, 0))
             d = ImageDraw.Draw(img)
             d.text((12, 12), "App missing", font=ctx.font_l, fill=(255, 80, 80))
-            d.text((12, 48), "K2 to go back", font=ctx.font_m, fill=(220, 220, 220))
+            d.text((12, 48), "B2 to go back", font=ctx.font_m, fill=(220, 220, 220))
             return img
 
         try:
@@ -318,11 +402,11 @@ def render(ctx) -> Image.Image:
             img = Image.new("RGB", (w, h), (0, 0, 0))
             d = ImageDraw.Draw(img)
             d.text((12, 12), "App crashed", font=ctx.font_l, fill=(255, 80, 80))
-            d.text((12, 48), "K2 to go back", font=ctx.font_m, fill=(220, 220, 220))
+            d.text((12, 48), "B2 to go back", font=ctx.font_m, fill=(220, 220, 220))
 
         held = float(ctx.user.get("_k3_held", 0.0))
         if held > 0:
-            img = overlay_hold_progress(img, "Hold K3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
+            img = overlay_hold_progress(img, "Hold B3 to shutdown", held, K3_SHUTDOWN_HOLD, ctx.font_s)
         return img
 
     return Image.new("RGB", (w, h), (0, 0, 0))

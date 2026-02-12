@@ -1,0 +1,10 @@
+{
+  "brightness": 80,
+  "gallery_auto_scroll": true,
+  "gallery_auto_seconds": 5.0,
+  "gallery_mode": "GRID",
+  "gallery_show_filename": true,
+  "gallery_swipe_seconds": 0.24,
+  "show_fps": false,
+  "target_fps": 30
+}

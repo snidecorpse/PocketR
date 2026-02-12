@@ -18,22 +18,24 @@ Engine features kept here:
 - Input edge events (joystick + K1/K2/K3)
 - Global hold-to-shutdown (hold K3 -> poweroff)
 - Frame pacing (target FPS from Settings)
-
-If your game instead exports run(ctx) (custom loop), we'll call that, but then YOU must
-implement hold-to-shutdown in your own loop using ctx.request_poweroff().
 """
-import os
-import json
-import time
-import subprocess
-import traceback
+
+from __future__ import annotations
+
 import importlib
+import json
+import os
+import shutil
+import subprocess
+import time
+import traceback
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Any
+from typing import Any, Dict, Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
 import ST7789
+
 
 # --------- Hardware / UX settings ---------
 ROTATE_DEG = 270          # 0 / 90 / 180 / 270
@@ -41,9 +43,10 @@ ACTIVE_HIGH = False       # Typical pull-up buttons: pressed=0
 FPS = 15                  # Default target FPS (can be changed in Settings)
 BACKLIGHT = 60            # Default backlight 0-100 (can be changed in Settings)
 SHUTDOWN_HOLD_SECONDS = 3.0
-CLICK_MAX_SECONDS = 0.7
 
-SETTINGS_FILE = "pocketr_settings.json"
+DEFAULT_DATA_DIR = "/root/.pocketr"
+LEGACY_SETTINGS_FILE = "pocketr_settings.json"
+SETTINGS_REL_PATH = "settings.json"
 SETTINGS_POLL_SECONDS = 0.5
 # -----------------------------------------
 
@@ -52,11 +55,32 @@ def clamp(v, lo=0, hi=100):
     return lo if v < lo else hi if v > hi else v
 
 
-def _settings_path(base_dir: str) -> str:
-    return os.path.join(base_dir, SETTINGS_FILE)
+def _safe_mkdir(path: str) -> bool:
+    try:
+        os.makedirs(path, exist_ok=True)
+        return True
+    except Exception:
+        return False
 
 
-def _load_settings_file(path: str) -> Dict[str, Any]:
+def _resolve_data_dir(base_dir: str) -> str:
+    env = str(os.environ.get("POCKETR_DATA_DIR", "") or "").strip()
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    return DEFAULT_DATA_DIR
+
+
+def _legacy_settings_path(base_dir: str) -> str:
+    return os.path.join(base_dir, LEGACY_SETTINGS_FILE)
+
+
+def _settings_path(ctx: "Ctx") -> str:
+    if hasattr(ctx, "data_path"):
+        return ctx.data_path(SETTINGS_REL_PATH)
+    return _legacy_settings_path(ctx.base_dir)
+
+
+def _load_settings(path: str) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f) or {}
@@ -65,28 +89,27 @@ def _load_settings_file(path: str) -> Dict[str, Any]:
         return {}
 
 
-def _apply_settings(ctx, data: Dict[str, Any]) -> None:
-    """Apply settings that the launcher owns (fps + backlight)."""
+def _apply_settings(ctx: "Ctx", settings: Dict[str, Any]) -> None:
     try:
-        b = int(clamp(float(data.get("brightness", BACKLIGHT)), 0, 100))
+        b = int(clamp(float(settings.get("brightness", BACKLIGHT)), 0, 100))
     except Exception:
-        b = int(BACKLIGHT)
+        b = BACKLIGHT
 
     try:
-        tfps = int(clamp(float(data.get("target_fps", FPS)), 5, 60))
+        tfps = int(clamp(float(settings.get("target_fps", FPS)), 5, 60))
     except Exception:
-        tfps = int(FPS)
+        tfps = FPS
 
     ctx.user["brightness"] = b
     ctx.user["target_fps"] = tfps
 
     try:
-        ctx.disp.bl_DutyCycle(b)
+        ctx.disp.bl_DutyCycle(int(b))
     except Exception:
         pass
 
 
-def _maybe_reload_settings(ctx, now: float) -> None:
+def _maybe_reload_settings(ctx: "Ctx", now: float) -> None:
     st = ctx.user.get("_settings_state")
     if not isinstance(st, dict):
         st = {"last": 0.0, "mtime": -1.0}
@@ -96,7 +119,7 @@ def _maybe_reload_settings(ctx, now: float) -> None:
         return
     st["last"] = now
 
-    path = _settings_path(ctx.base_dir)
+    path = _settings_path(ctx)
     try:
         mtime = float(os.path.getmtime(path))
     except Exception:
@@ -106,9 +129,25 @@ def _maybe_reload_settings(ctx, now: float) -> None:
         return
     st["mtime"] = mtime
 
-    data = _load_settings_file(path) if mtime > 0 else {}
+    data = _load_settings(path) if mtime > 0 else {}
     ctx.user["_prefs"] = data
     _apply_settings(ctx, data)
+
+
+def _migrate_legacy_settings(base_dir: str, data_dir: str) -> None:
+    legacy = _legacy_settings_path(base_dir)
+    target = os.path.join(data_dir, SETTINGS_REL_PATH)
+
+    if not os.path.isfile(legacy):
+        return
+    if os.path.isfile(target):
+        return
+
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy2(legacy, target)
+    except Exception:
+        pass
 
 
 def load_font(size: int):
@@ -150,39 +189,6 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int):
     return lines
 
 
-def _settings_path(base_dir: str) -> str:
-    return os.path.join(base_dir, SETTINGS_FILE)
-
-
-def _load_settings(path: str) -> Dict[str, Any]:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _apply_settings(ctx: "Ctx", settings: Dict[str, Any]) -> None:
-    # Brightness
-    try:
-        b = int(clamp(float(settings.get("brightness", BACKLIGHT)), 0, 100))
-    except Exception:
-        b = BACKLIGHT
-    ctx.user["brightness"] = b
-    try:
-        ctx.disp.bl_DutyCycle(int(b))
-    except Exception:
-        pass
-
-    # Target FPS
-    try:
-        tfps = int(clamp(float(settings.get("target_fps", FPS)), 5, 60))
-    except Exception:
-        tfps = FPS
-    ctx.user["target_fps"] = tfps
-
-
 def show_shutdown_screen(disp, font_title, font_body):
     img = Image.new("RGB", (disp.width, disp.height), (0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -219,6 +225,7 @@ def request_poweroff(disp, font_title, font_body):
 
 class InputEdge:
     """Edge events for joystick/buttons using Waveshare pin constants on disp."""
+
     def __init__(self, disp):
         self.disp = disp
         self.state: Dict[str, bool] = {}
@@ -259,12 +266,16 @@ class Ctx:
     font_l: Any
     base_dir: str
     game_dir: str
+    data_dir: str
     user: Dict[str, Any] = field(default_factory=dict)
 
-    # expose helpers to game
     def asset(self, *parts: str) -> str:
-        """Absolute path to a file in ./game/assets/"""
+        """Absolute path to a file in ./game/assets/."""
         return os.path.join(self.game_dir, "assets", *parts)
+
+    def data_path(self, *parts: str) -> str:
+        """Absolute path to a file in persistent data directory."""
+        return os.path.join(self.data_dir, *parts)
 
     def show(self, img: Image.Image):
         """Show an image on the LCD with the configured rotation."""
@@ -288,7 +299,6 @@ def show_error_screen(disp, title: str, body: str, font_title, font_body):
 
 
 def run_engine(game_mod, ctx: Ctx):
-    # optional init hook
     if hasattr(game_mod, "init"):
         game_mod.init(ctx)
 
@@ -308,7 +318,6 @@ def run_engine(game_mod, ctx: Ctx):
         # global hold-to-shutdown (K3)
         if "K3" in ev:
             k3_start = now
-
         if "K3_UP" in ev:
             k3_start = None
 
@@ -317,14 +326,12 @@ def run_engine(game_mod, ctx: Ctx):
             if held >= SHUTDOWN_HOLD_SECONDS:
                 ctx.request_poweroff()
 
-            # expose progress info to the game if it wants it
             ctx.user["shutdown_holding"] = True
             ctx.user["shutdown_hold_seconds"] = held
         else:
             ctx.user["shutdown_holding"] = False
             ctx.user["shutdown_hold_seconds"] = 0.0
 
-        # FPS smoothing for overlays / settings debug
         if dt > 0.0001:
             inst = 1.0 / dt
             prev = float(ctx.user.get("_fps_smooth", inst) or inst)
@@ -338,7 +345,6 @@ def run_engine(game_mod, ctx: Ctx):
 
         img = game_mod.render(ctx)
         if img is not None:
-            # Global FPS overlay if enabled
             prefs = ctx.user.get("_prefs", {})
             if isinstance(prefs, dict) and prefs.get("show_fps", False):
                 try:
@@ -351,7 +357,6 @@ def run_engine(game_mod, ctx: Ctx):
                     pass
             ctx.show(img)
 
-        # pace the loop based on current target fps
         target_fps = float(ctx.user.get("target_fps", FPS) or FPS)
         target_fps = max(5.0, min(60.0, target_fps))
         frame_time = time.time() - now
@@ -359,18 +364,22 @@ def run_engine(game_mod, ctx: Ctx):
 
 
 def main():
-    # Absolute paths (never rely on cwd)
     base_dir = os.path.dirname(os.path.abspath(__file__))
     game_dir = os.path.join(base_dir, "game")
 
-    # Hardware init
+    data_dir = _resolve_data_dir(base_dir)
+    if not _safe_mkdir(data_dir):
+        fallback = os.path.join(base_dir, ".pocketr")
+        _safe_mkdir(fallback)
+        data_dir = fallback
+
+    _migrate_legacy_settings(base_dir, data_dir)
+
     disp = ST7789.ST7789()
     disp.Init()
     disp.clear()
-    # default backlight (will be overwritten by Settings, if present)
     disp.bl_DutyCycle(BACKLIGHT)
 
-    # Fonts + input
     font_s = load_font(12)
     font_m = load_font(16)
     font_l = load_font(22)
@@ -384,27 +393,23 @@ def main():
         font_l=font_l,
         base_dir=base_dir,
         game_dir=game_dir,
+        data_dir=data_dir,
     )
 
-    # Load settings once at boot so brightness/fps apply immediately
     _maybe_reload_settings(ctx, time.time())
 
     try:
-        # Import the real game
         game_mod = importlib.import_module("game.main")
 
-        # If game exports run(ctx), let it own the loop
         if hasattr(game_mod, "run") and not hasattr(game_mod, "render"):
             game_mod.run(ctx)
             return
 
-        # Otherwise use the stable engine loop here
         run_engine(game_mod, ctx)
 
     except Exception as e:
         tb = traceback.format_exc()
         show_error_screen(disp, "GAME CRASH", str(e), font_l, font_s)
-        # Also print to journalctl
         print(tb)
         time.sleep(5)
         raise

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import List, Tuple
 
 from PIL import Image, ImageDraw
@@ -169,3 +170,141 @@ def ping_pong(t: float, period: float) -> float:
 def breathe(t: float, period: float = 2.0) -> float:
     """0..1..0 smoothly."""
     return 0.5 - 0.5 * math.cos(2.0 * math.pi * ((t / period) % 1.0))
+
+
+def _resample():
+    if hasattr(Image, "Resampling"):
+        return Image.Resampling.LANCZOS
+    return Image.LANCZOS
+
+
+def _draw_star(d: ImageDraw.ImageDraw, x: int, y: int, size: int, color=(255, 220, 180), alpha: int = 255) -> None:
+    c = (color[0], color[1], color[2], alpha)
+    s = max(1, int(size))
+    d.line([x - s, y, x + s, y], fill=c, width=1)
+    d.line([x, y - s, x, y + s], fill=c, width=1)
+    if s >= 2:
+        d.line([x - (s - 1), y - (s - 1), x + (s - 1), y + (s - 1)], fill=(255, 190, 140, max(40, alpha - 90)), width=1)
+        d.line([x + (s - 1), y - (s - 1), x - (s - 1), y + (s - 1)], fill=(255, 190, 140, max(40, alpha - 90)), width=1)
+
+
+def generate_red_background(size: Tuple[int, int]) -> Image.Image:
+    """Fallback red sparkle background if app_bg.png is not present."""
+    w, h = size
+    img = Image.new("RGBA", (w, h), (8, 0, 0, 255))
+    d = ImageDraw.Draw(img)
+
+    # Radial red core
+    cx = w * 0.5
+    cy = h * 0.52
+    max_r = int(max(w, h) * 0.65)
+    for i in range(max_r, 0, -1):
+        t = i / float(max(1, max_r))
+        alpha = int(70 * (1.0 - t))
+        red = int(120 + 110 * (1.0 - t))
+        d.ellipse([cx - i, cy - i, cx + i, cy + i], fill=(red, 0, 0, alpha))
+
+    # Twinkling square frame near the edges
+    margin = max(10, min(w, h) // 14)
+    x0, y0 = margin, margin
+    x1, y1 = w - margin - 1, h - margin - 1
+    d.rounded_rectangle([x0, y0, x1, y1], radius=max(12, margin // 2), outline=(255, 170, 150, 65), width=2)
+
+    perim = 2 * ((x1 - x0) + (y1 - y0))
+    n = max(100, perim // 6)
+    for i in range(n):
+        t = i / float(max(1, n))
+        p = t * perim
+        seg = (x1 - x0)
+        if p < seg:
+            x, y = int(x0 + p), y0
+        elif p < seg + (y1 - y0):
+            x, y = x1, int(y0 + (p - seg))
+        elif p < (2 * seg) + (y1 - y0):
+            x, y = int(x1 - (p - (seg + (y1 - y0)))), y1
+        else:
+            x, y = x0, int(y1 - (p - ((2 * seg) + (y1 - y0))))
+        bright = 90 + int(120 * (0.5 + 0.5 * math.sin(i * 1.7)))
+        _draw_star(d, x, y, 1 if (i % 3) else 3, alpha=min(255, bright))
+
+    # Fine texture
+    for y in range(0, h, 2):
+        alpha = 10 + ((y * 13) % 22)
+        d.line([0, y, w, y], fill=(255, 30, 30, alpha), width=1)
+
+    return img
+
+
+def app_background(ctx, dim_alpha: int = 92) -> Image.Image:
+    """
+    Shared background for non-pet apps.
+    Uses game/assets/ui/app_bg.png when available, otherwise procedural fallback.
+    """
+    w, h = int(ctx.disp.width), int(ctx.disp.height)
+    bg_path = ctx.asset("ui", "app_bg.png")
+    try:
+        mtime = int(os.path.getmtime(bg_path))
+    except Exception:
+        mtime = -1
+    key = f"{w}x{h}:{mtime}"
+
+    if ctx.user.get("_app_bg_key") != key:
+        if os.path.isfile(bg_path):
+            try:
+                base = Image.open(bg_path).convert("RGBA")
+                if base.size != (w, h):
+                    base = base.resize((w, h), _resample())
+            except Exception:
+                base = generate_red_background((w, h))
+        else:
+            base = generate_red_background((w, h))
+        ctx.user["_app_bg_base"] = base
+        ctx.user["_app_bg_key"] = key
+
+    base = ctx.user.get("_app_bg_base")
+    if not isinstance(base, Image.Image):
+        base = generate_red_background((w, h))
+
+    out = base.copy().convert("RGBA")
+    if dim_alpha > 0:
+        a = int(clamp(float(dim_alpha), 0.0, 255.0))
+        out = Image.alpha_composite(out, Image.new("RGBA", (w, h), (0, 0, 0, a)))
+    return out.convert("RGB")
+
+
+def overlay_panel(
+    img: Image.Image,
+    rect: Tuple[int, int, int, int],
+    radius: int = 14,
+    fill=(6, 6, 10, 156),
+    outline=(255, 255, 255, 90),
+    width: int = 2,
+) -> Image.Image:
+    """Alpha-composited rounded panel drawn over an image."""
+    base = img.convert("RGBA")
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    d.rounded_rectangle(list(rect), radius=radius, fill=fill, outline=outline, width=width)
+    return Image.alpha_composite(base, layer).convert("RGB")
+
+
+def draw_wrapped_block(
+    d: ImageDraw.ImageDraw,
+    text: str,
+    x: int,
+    y: int,
+    max_width: int,
+    font,
+    fill=(220, 220, 220),
+    line_h: int = 16,
+) -> int:
+    """Draw wrapped multi-line text and return the next y."""
+    for para in (text or "").splitlines():
+        if not para.strip():
+            y += max(4, line_h // 2)
+            continue
+        lines = wrap_text(d, para, font, max_width=max_width) or [""]
+        for line in lines:
+            d.text((x, y), line, font=font, fill=fill)
+            y += line_h
+    return y

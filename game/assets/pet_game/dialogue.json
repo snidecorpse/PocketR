@@ -1,0 +1,58 @@
+{
+  "greeting": [
+    {
+      "player": "Hey little dude.",
+      "pet": "Hey! I was waiting for you.",
+      "social": 5,
+      "fun": 2
+    },
+    {
+      "player": "Morning check-in.",
+      "pet": "Good morning. Ready to hang out.",
+      "social": 4,
+      "fun": 1
+    }
+  ],
+  "feelings": [
+    {
+      "player": "How are you feeling right now?",
+      "pet": "Better when my bars are healthy and we talk.",
+      "social": 4,
+      "fun": 1
+    },
+    {
+      "player": "You doing okay?",
+      "pet": "Yeah. Keep me fed, rested, and clean.",
+      "social": 3,
+      "fun": 1
+    }
+  ],
+  "plans": [
+    {
+      "player": "What should we do next?",
+      "pet": "Arcade then lounge sounds perfect.",
+      "social": 3,
+      "fun": 3
+    },
+    {
+      "player": "Any requests?",
+      "pet": "Maybe a shower, then a game.",
+      "social": 2,
+      "fun": 2
+    }
+  ],
+  "jokes": [
+    {
+      "player": "Tell me a joke.",
+      "pet": "I tried coding naps, but I kept getting sleep loops.",
+      "social": 2,
+      "fun": 4
+    },
+    {
+      "player": "Another one.",
+      "pet": "My favorite bug is the one that makes hugs overpowered.",
+      "social": 2,
+      "fun": 3
+    }
+  ]
+}
