@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from .ui_common import (
     app_background,
@@ -191,6 +191,44 @@ def _draw_square_intro_ring(base: Image.Image, t: float, pad: int) -> Image.Imag
     return Image.alpha_composite(base, overlay)
 
 
+def _draw_pulse_ring(
+    img: Image.Image,
+    rect: tuple[int, int, int, int],
+    radius: int,
+    thickness: int,
+    color: tuple[int, int, int],
+    alpha: int,
+) -> Image.Image:
+    """Draw a contiguous rounded-rect ring (no segmented outline artifacts)."""
+    x0, y0, x1, y1 = rect
+    if x1 <= x0 or y1 <= y0:
+        return img
+
+    a = max(0, min(255, int(alpha)))
+    if a <= 0:
+        return img
+
+    r = max(0, int(radius))
+    t = max(1, int(thickness))
+    outer_mask = Image.new("L", img.size, 0)
+    d_outer = ImageDraw.Draw(outer_mask)
+    d_outer.rounded_rectangle([x0, y0, x1, y1], radius=r, fill=255)
+
+    inner_mask = Image.new("L", img.size, 0)
+    ix0 = x0 + t
+    iy0 = y0 + t
+    ix1 = x1 - t
+    iy1 = y1 - t
+    if ix1 > ix0 and iy1 > iy0:
+        d_inner = ImageDraw.Draw(inner_mask)
+        d_inner.rounded_rectangle([ix0, iy0, ix1, iy1], radius=max(0, r - t), fill=255)
+
+    ring_mask = ImageChops.subtract(outer_mask, inner_mask)
+    ring_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ring_layer.paste((color[0], color[1], color[2], a), (0, 0, img.size[0], img.size[1]), ring_mask)
+    return Image.alpha_composite(img, ring_layer)
+
+
 
 def update(ctx, dt: float, ev: Dict[str, bool]):
     _load_assets(ctx)
@@ -276,6 +314,29 @@ def update(ctx, dt: float, ev: Dict[str, bool]):
             if wants_back:
                 ctx.user["os_mode"] = MODE_HOME
                 ctx.user["os_active_app"] = None
+                ctx.user.pop("_app_switch_to", None)
+                return
+
+            # Optional app-to-app switch contract:
+            # app sets ctx.user["_app_switch_to"] to a menu index.
+            sw = ctx.user.pop("_app_switch_to", None)
+            if sw is not None:
+                try:
+                    sw_idx = int(sw)
+                except Exception:
+                    sw_idx = -1
+                if sw_idx in MENU_MODULES:
+                    ctx.user["os_active_app"] = sw_idx
+                    ctx.user["os_mode"] = MODE_APP
+                    sw_mod = _get_app_module(sw_idx)
+                    if sw_mod is not None and hasattr(sw_mod, "init"):
+                        try:
+                            sw_mod.init(ctx)
+                        except Exception:
+                            pass
+                else:
+                    ctx.user["os_mode"] = MODE_HOME
+                    ctx.user["os_active_app"] = None
         else:
             if "K2" in ev:
                 ctx.user["os_mode"] = MODE_HOME
@@ -347,21 +408,24 @@ def render(ctx) -> Image.Image:
 
             if i == sel:
                 pulse = breathe(now, 4.8)
-                glow = int(65 + 140 * pulse)
-                w_outer = 3 + int(2 * pulse)
-                w_inner = 2 + int(1 * pulse)
+                glow_outer = int(34 + 84 * pulse)
+                glow_inner = int(82 + 150 * pulse)
                 rad = max(8, cell // 12)
-                d.rounded_rectangle(
-                    [x - 7, y - 7, x + cell + 7, y + cell + 7],
-                    radius=rad + 2,
-                    outline=(255, 230, 210, max(32, glow - 40)),
-                    width=w_outer,
+                img = _draw_pulse_ring(
+                    img,
+                    (x - 8, y - 8, x + cell + 8, y + cell + 8),
+                    radius=rad + 3,
+                    thickness=4,
+                    color=(255, 230, 210),
+                    alpha=glow_outer,
                 )
-                d.rounded_rectangle(
-                    [x - 3, y - 3, x + cell + 3, y + cell + 3],
+                img = _draw_pulse_ring(
+                    img,
+                    (x - 3, y - 3, x + cell + 3, y + cell + 3),
                     radius=rad,
-                    outline=(255, 245, 235, glow),
-                    width=w_inner,
+                    thickness=2,
+                    color=(255, 245, 235),
+                    alpha=glow_inner,
                 )
 
         out = img.convert("RGB")

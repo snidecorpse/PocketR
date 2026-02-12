@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from ..persistence import ensure_data_dir, read_json, write_json_atomic
 from ..ui_common import clamp, overlay_panel, wrap_text
@@ -32,6 +32,7 @@ ONBOARD_CONTROLS = "intro_controls.png"
 
 AGE_ACCEL = 60.0  # 1 real minute = 1 pet hour
 K2_RECALL_SECONDS = 1.2
+B3_SHORT_MAX_SECONDS = 0.85
 PERSIST_SECONDS = 4.0
 
 
@@ -54,7 +55,7 @@ ROOMS: Dict[str, Dict] = {
         "name": "Living Room",
         "slug": "living",
         "neighbors": {"UP": ROOM_HUB},
-        "actions": ["Watch TV", "Lounge", "Talk"],
+        "actions": ["Watch TV", "Lounge", "Talk", "Open Gallery"],
         "color": (24, 36, 44),
     },
     ROOM_ARCADE: {
@@ -130,25 +131,11 @@ SPRITE_FILES = {
 }
 
 
-ICON_FILES = {
-    ROOM_HUB: "room_hub.png",
-    ROOM_BED: "room_bedroom.png",
-    ROOM_LIVING: "room_living.png",
-    ROOM_ARCADE: "room_arcade.png",
-    ROOM_BATH: "room_bathroom.png",
-    "state_idle": "state_idle.png",
-    "state_sleep": "state_sleep.png",
-    "state_shower": "state_shower.png",
-    "state_toilet": "state_toilet.png",
-    "mood_high": "mood_high.png",
-    "mood_mid": "mood_mid.png",
-    "mood_low": "mood_low.png",
-}
-
-
 @dataclass
 class PetState:
     mode: str = MODE_ONBOARD_1
+    seen_tutorial: bool = False
+
     room: str = ROOM_HUB
     x: float = 120.0
     y: float = 164.0
@@ -164,14 +151,11 @@ class PetState:
 
     alive: bool = True
     death_reason: str = ""
-
-    # Pet-age seconds (accelerated clock)
     age_seconds: float = 0.0
 
     panel_open: bool = False
-    panel_kind: str = "ACTIONS"  # ACTIONS / TALK
+    panel_kind: str = "ACTIONS"
     panel_sel: int = 0
-
     talk_index: int = 0
 
     msg: str = ""
@@ -180,18 +164,16 @@ class PetState:
     walk_phase: float = 0.0
     pose: str = "idle"
     pose_until: float = 0.0
-
     blur_until: float = 0.0
 
-    # Timing + persistence
     last_tick: float = 0.0
     last_persist: float = 0.0
 
-    # K2 long-press tutorial recall
     k2_hold_t0: float = 0.0
     k2_long_triggered: bool = False
 
-    seen_tutorial: bool = False
+    k3_hold_t0: float = 0.0
+    k3_long_triggered: bool = False
 
 
 def _state_fields() -> set:
@@ -235,6 +217,52 @@ def _persist_state(ctx, st: PetState, force: bool = False) -> None:
         pass
 
 
+def _overlay_font(ctx):
+    cache = ctx.user.get("_pet_overlay_font", None)
+    if cache is not None:
+        return cache
+
+    for path in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/Library/Fonts/Courier New.ttf",
+        "/Library/Fonts/Andale Mono.ttf",
+    ]:
+        try:
+            f = ImageFont.truetype(path, 13)
+            ctx.user["_pet_overlay_font"] = f
+            return f
+        except Exception:
+            pass
+
+    f = getattr(ctx, "font_s", None)
+    ctx.user["_pet_overlay_font"] = f
+    return f
+
+
+def _meta_font(ctx):
+    cache = ctx.user.get("_pet_meta_font", None)
+    if cache is not None:
+        return cache
+
+    for path in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/Library/Fonts/Courier New.ttf",
+        "/Library/Fonts/Andale Mono.ttf",
+    ]:
+        try:
+            f = ImageFont.truetype(path, 10)
+            ctx.user["_pet_meta_font"] = f
+            return f
+        except Exception:
+            pass
+
+    f = getattr(ctx, "font_s", None)
+    ctx.user["_pet_meta_font"] = f
+    return f
+
+
 def init(ctx):
     ensure_data_dir(ctx)
     now = time.time()
@@ -242,22 +270,24 @@ def init(ctx):
     raw = read_json(ctx, STATE_REL_PATH, {})
     st = _st_from_dict(raw)
 
-    # Fresh app session always starts onboarding flow as requested.
-    st.mode = MODE_ONBOARD_1
+    # First time only intro. After first completion, open straight into gameplay.
+    st.mode = MODE_PLAY if st.seen_tutorial else MODE_ONBOARD_1
     st.panel_open = False
     st.panel_kind = "ACTIONS"
     st.panel_sel = 0
     st.msg = ""
     st.msg_until = 0.0
+
     st.k2_hold_t0 = 0.0
     st.k2_long_triggered = False
+    st.k3_hold_t0 = 0.0
+    st.k3_long_triggered = False
 
-    if st.last_tick <= 0.0:
-        st.last_tick = now
+    st.last_tick = now
 
     w, h = int(ctx.disp.width), int(ctx.disp.height)
     st.x = float(clamp(st.x, 12.0, float(w - 12)))
-    st.y = float(clamp(st.y, 94.0, float(h - 14)))
+    st.y = float(clamp(st.y, 92.0, float(h - 14)))
 
     ctx.user["pet_game_v3"] = _to_dict(st)
 
@@ -314,7 +344,6 @@ def _load_sprites(ctx, px: int) -> Dict[str, Image.Image]:
 
 
 def _dialogue_data(ctx) -> Dict[str, List[Dict]]:
-    # Prefer persistent editable file in data dir, fallback to bundled asset.
     data_path = _data_dialogue_path(ctx)
     fallback_path = _asset_path(ctx, "dialogue.json")
 
@@ -334,8 +363,8 @@ def _dialogue_data(ctx) -> Dict[str, List[Dict]]:
         return cache["data"]
 
     data: Dict[str, List[Dict]] = {}
-
     source = data_path if os.path.isfile(data_path) else fallback_path
+
     try:
         with open(source, "r", encoding="utf-8") as f:
             raw = json.load(f)
@@ -374,7 +403,7 @@ def _make_message(st: PetState, text: str, now: float, seconds: float = 2.4) -> 
 
 def _enter_room(st: PetState, room: str, side: str, w: int, h: int, now: float) -> None:
     st.room = room
-    top_bound = 92.0
+    top_bound = 88.0
     bottom_bound = float(h - 12)
 
     if side == "LEFT":
@@ -413,7 +442,7 @@ def _apply_movement(ctx, st: PetState, dt: float, now: float) -> bool:
     st.walk_phase += dt * 8.0
 
     w, h = int(ctx.disp.width), int(ctx.disp.height)
-    top_bound = 92.0
+    top_bound = 88.0
     bottom_bound = float(h - 12)
     edge = 12.0
 
@@ -561,7 +590,6 @@ def _boost(st: PetState, **kwargs: float) -> None:
 
 
 def _run_action(st: PetState, action: str, now: float) -> str:
-    # light actions
     if action == "Check In":
         _boost(st, social=3, mood=2, fun=1)
         return "Quick check-in. Calm and steady."
@@ -570,7 +598,6 @@ def _run_action(st: PetState, action: str, now: float) -> str:
         _boost(st, energy=2, mood=1, fun=1)
         return "Short stretch done."
 
-    # medium actions
     if action == "Cuddle":
         _boost(st, social=8, mood=6, energy=-2, fun=3)
         return "Cuddle time. Feels safer."
@@ -592,7 +619,6 @@ def _run_action(st: PetState, action: str, now: float) -> str:
         _boost(st, energy=6, mood=3, fun=2, bladder=-2)
         return "Lounge break complete."
 
-    # heavy actions
     if action == "Runner Dash":
         score = random.randint(7, 16)
         _boost(st, fun=score, mood=3, energy=-7, hunger=-4, bladder=-3)
@@ -653,37 +679,69 @@ def _talk_once(st: PetState, dialogue: Dict[str, List[Dict]], category: str) -> 
     return f"You: {user_line} | Pet: {pet_line}"
 
 
-def _handle_k2(st: PetState, now: float, ev: Dict[str, bool], inputs) -> str:
-    """
-    Returns: NONE / SHORT / LONG
-    """
-    if "K2" in ev:
-        st.k2_hold_t0 = now
-        st.k2_long_triggered = False
+def _handle_short_long(st: PetState, now: float, ev: Dict[str, bool], inputs, key: str, hold_attr: str, long_attr: str, long_seconds: float) -> str:
+    key_up = f"{key}_UP"
 
-    if st.k2_hold_t0 > 0.0 and inputs.is_down("K2") and not st.k2_long_triggered:
-        if (now - st.k2_hold_t0) >= K2_RECALL_SECONDS:
-            st.k2_long_triggered = True
+    if key in ev:
+        setattr(st, hold_attr, now)
+        setattr(st, long_attr, False)
+
+    t0 = float(getattr(st, hold_attr, 0.0) or 0.0)
+    long_triggered = bool(getattr(st, long_attr, False))
+    if t0 > 0.0 and inputs.is_down(key) and (not long_triggered):
+        if (now - t0) >= long_seconds:
+            setattr(st, long_attr, True)
             return "LONG"
 
-    if "K2_UP" in ev:
-        was_long = st.k2_long_triggered or (st.k2_hold_t0 > 0.0 and (now - st.k2_hold_t0) >= K2_RECALL_SECONDS)
-        st.k2_hold_t0 = 0.0
-        st.k2_long_triggered = False
+    if key_up in ev:
+        t0 = float(getattr(st, hold_attr, 0.0) or 0.0)
+        was_long = bool(getattr(st, long_attr, False)) or (t0 > 0.0 and (now - t0) >= long_seconds)
+        setattr(st, hold_attr, 0.0)
+        setattr(st, long_attr, False)
         return "LONG" if was_long else "SHORT"
 
     return "NONE"
+
+
+def _quick_support(st: PetState, now: float) -> None:
+    lines = [
+        "You gave a quick pep talk.",
+        "A little encouragement helped.",
+        "He smiles. That helped.",
+        "Quick check-in: feeling better.",
+    ]
+    _boost(st, mood=1.5, social=1.0)
+    _make_message(st, random.choice(lines), now, 1.5)
+
+
+def _quick_care(st: PetState, now: float) -> None:
+    if st.hunger < 50:
+        _boost(st, hunger=4, mood=1)
+        _make_message(st, "Quick snack delivered.", now, 1.6)
+        return
+    if st.energy < 50:
+        _boost(st, energy=4, mood=1)
+        _make_message(st, "Short rest helped.", now, 1.6)
+        return
+    if st.hygiene < 45:
+        _boost(st, hygiene=5, mood=1)
+        _make_message(st, "Quick tidy-up done.", now, 1.6)
+        return
+    if st.social < 45 or st.fun < 45:
+        _boost(st, social=3, fun=3, mood=1)
+        _make_message(st, "Quick play break.", now, 1.6)
+        return
+
+    _boost(st, mood=2, health=0.3)
+    _make_message(st, "Quick care done.", now, 1.5)
 
 
 def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
     st = _st(ctx)
     now = time.time()
 
-    if st.last_tick <= 0.0:
-        st.last_tick = now
+    # Strict frame-based progression while app is active only.
     sim_dt = max(0.0, min(float(dt), 0.25))
-    if sim_dt <= 0.0:
-        sim_dt = max(0.0, min(now - float(st.last_tick), 0.25))
     st.last_tick = now
 
     if st.msg and now >= float(st.msg_until):
@@ -692,7 +750,9 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
     if now >= float(st.pose_until):
         st.pose = "idle"
 
-    k2_evt = _handle_k2(st, now, ev, ctx.inputs)
+    k2_evt = _handle_short_long(st, now, ev, ctx.inputs, "K2", "k2_hold_t0", "k2_long_triggered", K2_RECALL_SECONDS)
+    b3_evt = _handle_short_long(st, now, ev, ctx.inputs, "K3", "k3_hold_t0", "k3_long_triggered", B3_SHORT_MAX_SECONDS)
+
     if k2_evt == "LONG":
         st.mode = MODE_ONBOARD_1
         st.panel_open = False
@@ -702,29 +762,28 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
         _save(ctx, st, force_persist=True)
         return False
 
-    confirm = ("K1" in ev) or ("PRESS" in ev)
+    intro_confirm = ("K1" in ev) or ("PRESS" in ev)
 
-    # Onboarding flow
     if st.mode == MODE_ONBOARD_1:
-        if confirm:
+        if intro_confirm:
             st.mode = MODE_ONBOARD_2
-            st.seen_tutorial = True
         elif k2_evt == "SHORT":
             _save(ctx, st, force_persist=True)
             return True
-
         _save(ctx, st)
         return False
 
     if st.mode == MODE_ONBOARD_2:
-        if confirm:
+        if intro_confirm:
             st.mode = MODE_PLAY
-            _make_message(st, "Welcome to PocketR pet life.", now, 1.8)
             st.seen_tutorial = True
+            st.last_tick = now
+            _make_message(st, "Welcome to PocketR pet life.", now, 1.8)
+            _save(ctx, st, force_persist=True)
+            return False
         elif k2_evt == "SHORT":
             _save(ctx, st, force_persist=True)
             return True
-
         _save(ctx, st)
         return False
 
@@ -734,15 +793,23 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
             st.panel_open = False
             st.panel_kind = "ACTIONS"
             st.panel_sel = 0
-            _save(ctx, st, force_persist=True)
-            return False
-        _save(ctx, st, force_persist=True)
-        return True
+        else:
+            _quick_support(st, now)
+
+    # B3 short quick care action (global hold-B3 shutdown still handled by launcher).
+    if b3_evt == "SHORT" and st.alive:
+        _quick_care(st, now)
+
+    # PRESS = quick open actions only.
+    if ("PRESS" in ev) and st.alive and (not st.panel_open):
+        st.panel_open = True
+        st.panel_kind = "ACTIONS"
+        st.panel_sel = 0
 
     if not st.alive:
-        if confirm:
+        if "K1" in ev:
             keep_age = st.age_seconds
-            st = PetState(mode=MODE_PLAY, age_seconds=keep_age, last_tick=now)
+            st = PetState(mode=MODE_PLAY, seen_tutorial=True, age_seconds=keep_age, last_tick=now)
             _make_message(st, "A new buddy joined you.", now, 2.0)
             _save(ctx, st, force_persist=True)
             return False
@@ -767,11 +834,21 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
         if "DOWN" in ev and items:
             st.panel_sel = (st.panel_sel + 1) % len(items)
 
-        if confirm and items:
+        # B1 confirm only.
+        if ("K1" in ev) and items:
             chosen = items[st.panel_sel]
+
             if st.panel_kind == "ACTIONS" and chosen == "Talk":
                 st.panel_kind = "TALK"
                 st.panel_sel = 0
+            elif st.panel_kind == "ACTIONS" and chosen == "Open Gallery":
+                st.panel_open = False
+                st.panel_kind = "ACTIONS"
+                st.panel_sel = 0
+                _make_message(st, "Opening Gallery...", now, 1.2)
+                ctx.user["_app_switch_to"] = 1
+                _save(ctx, st, force_persist=True)
+                return False
             elif st.panel_kind == "TALK":
                 msg = _talk_once(st, dialogue, chosen)
                 _make_message(st, msg, now, 3.0)
@@ -784,11 +861,6 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
                 st.panel_open = False
                 st.panel_kind = "ACTIONS"
                 st.panel_sel = 0
-    else:
-        if confirm:
-            st.panel_open = True
-            st.panel_kind = "ACTIONS"
-            st.panel_sel = 0
 
     _save(ctx, st)
     return False
@@ -809,15 +881,15 @@ def _room_base_fallback(size: Tuple[int, int], room: str) -> Image.Image:
         bb = int(8 + (b * (0.40 + 0.60 * (1.0 - t))))
         d.line([0, y, w, y], fill=(rr, gg, bb, 255), width=1)
 
-    d.rounded_rectangle([4, 84, w - 5, h - 5], radius=7, outline=(255, 220, 210, 80), width=2)
+    d.rounded_rectangle([4, 82, w - 5, h - 5], radius=7, outline=(255, 220, 210, 80), width=2)
     name = room_info.get("name", room)
-    d.text((8, 92), f"[{name} base placeholder]", fill=(245, 232, 226, 180))
+    d.text((8, 90), f"[{name} base placeholder]", fill=(245, 232, 226, 180))
     return base
 
 
 def _object_fallback(size: Tuple[int, int], room_slug: str, fname: str) -> Image.Image:
-    w, h = size
-    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    _w, _h = size
+    layer = Image.new("RGBA", size, (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
 
     cfg = OBJECT_LAYOUT.get(room_slug, {}).get(fname)
@@ -950,49 +1022,6 @@ def _draw_stats(ctx, img: Image.Image, st: PetState) -> None:
         _draw_stat_bar(d, x, 23, bar_w, bar_h, label, value, STAT_COLORS[key], ctx.font_s)
 
 
-def _icon_placeholder(size: int, label: str, color: Tuple[int, int, int]) -> Image.Image:
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([1, 1, size - 2, size - 2], radius=4, fill=(color[0], color[1], color[2], 200), outline=(255, 230, 215, 210), width=1)
-    d.text((3, max(1, size // 2 - 5)), label[:3], fill=(255, 246, 238, 230))
-    return img
-
-
-def _load_icon(ctx, name: str, size: int, fallback_label: str, fallback_color: Tuple[int, int, int]) -> Image.Image:
-    fname = ICON_FILES.get(name)
-    if fname:
-        path = ctx.asset("pet_game", "icons", fname)
-        if os.path.isfile(path):
-            try:
-                img = Image.open(path).convert("RGBA")
-                if img.size != (size, size):
-                    img = img.resize((size, size))
-                return img
-            except Exception:
-                pass
-    return _icon_placeholder(size, fallback_label, fallback_color)
-
-
-def _state_icon_key(st: PetState) -> str:
-    if not st.alive:
-        return "state_idle"
-    if st.pose == "sleep":
-        return "state_sleep"
-    if st.pose == "shower":
-        return "state_shower"
-    if st.pose == "toilet":
-        return "state_toilet"
-    return "state_idle"
-
-
-def _mood_icon_key(st: PetState) -> str:
-    if st.mood >= 70:
-        return "mood_high"
-    if st.mood >= 40:
-        return "mood_mid"
-    return "mood_low"
-
-
 def _format_age(age_seconds: float) -> str:
     age = max(0, int(age_seconds))
     if age < 3600:
@@ -1012,28 +1041,40 @@ def _format_age(age_seconds: float) -> str:
     return f"{mo}mo {d}d"
 
 
+def _mood_word(st: PetState) -> str:
+    if st.hygiene < 24:
+        return "Dirty"
+    if st.energy < 24:
+        return "Tired"
+    if st.social < 30 or st.fun < 30:
+        return "Misses You"
+    if st.mood >= 72:
+        return "Happy"
+    if st.mood >= 44:
+        return "Okay"
+    return "Sad"
+
+
 def _draw_top_info(ctx, img: Image.Image, st: PetState) -> None:
     d = ImageDraw.Draw(img, "RGBA")
     w, _h = img.size
+    mf = _meta_font(ctx)
 
     room_name = str(ROOMS.get(st.room, ROOMS[ROOM_HUB]).get("name", st.room))
-    d.text((10, 43), room_name, font=ctx.font_m, fill=(255, 242, 238, 230))
-
-    icon_sz = 14
-    x = (w // 2) - 26
-    y = 44
-
-    room_icon = _load_icon(ctx, st.room, icon_sz, "RM", (148, 94, 94))
-    state_icon = _load_icon(ctx, _state_icon_key(st), icon_sz, "ST", (102, 118, 160))
-    mood_icon = _load_icon(ctx, _mood_icon_key(st), icon_sz, "MO", (160, 126, 86))
-
-    img.paste(room_icon, (x, y), room_icon)
-    img.paste(state_icon, (x + 18, y), state_icon)
-    img.paste(mood_icon, (x + 36, y), mood_icon)
+    d.text((10, 40), room_name, font=mf, fill=(245, 234, 228, 230))
 
     age_text = _format_age(st.age_seconds)
-    tw = int(d.textlength(age_text, font=ctx.font_s))
-    d.text((w - 10 - tw, 46), age_text, font=ctx.font_s, fill=(232, 210, 202, 230))
+    tw = int(d.textlength(age_text, font=mf))
+    d.text((w - 10 - tw, 40), age_text, font=mf, fill=(232, 210, 202, 228))
+
+    mood = _mood_word(st)
+    m_tw = int(d.textlength(mood, font=mf))
+    bx = (w - m_tw) // 2 - 8
+    by = 38
+    bw = m_tw + 16
+    bh = 12
+    d.rounded_rectangle([bx, by, bx + bw, by + bh], radius=3, fill=(20, 14, 16, 170), outline=(255, 220, 210, 130), width=1)
+    d.text((bx + 8, by + 1), mood, font=mf, fill=(248, 238, 232, 235))
 
 
 def _sprite_for_state(st: PetState, sprites: Dict[str, Image.Image], moving: bool, now: float) -> Image.Image:
@@ -1057,14 +1098,15 @@ def _draw_action_panel(ctx, img: Image.Image, st: PetState, dialogue: Dict[str, 
     rect = (8, h - 94, w - 9, h - 8)
     img = overlay_panel(img, rect, radius=6, fill=(8, 6, 10, 168), outline=(255, 220, 210, 105), width=1)
     d = ImageDraw.Draw(img)
+    of = _overlay_font(ctx)
 
     x0, y0, x1, _y1 = rect
     title = "Talk" if st.panel_kind == "TALK" else "Actions"
-    d.text((x0 + 10, y0 + 6), title, font=ctx.font_m, fill=(252, 240, 234))
+    d.text((x0 + 10, y0 + 6), title, font=of, fill=(252, 240, 234))
 
     items = _panel_items(st, dialogue)
     if not items:
-        d.text((x0 + 10, y0 + 28), "No options", font=ctx.font_s, fill=(240, 210, 198))
+        d.text((x0 + 10, y0 + 28), "No options", font=of, fill=(240, 210, 198))
         return img
 
     vis = 3
@@ -1082,12 +1124,12 @@ def _draw_action_panel(ctx, img: Image.Image, st: PetState, dialogue: Dict[str, 
             fg = (236, 222, 215)
 
         name = str(item).replace("_", " ").title() if st.panel_kind == "TALK" else str(item)
-        d.text((x0 + 12, y), name, font=ctx.font_s, fill=fg)
+        d.text((x0 + 12, y), name, font=of, fill=fg)
         y += 18
 
-    hint = "B1 choose  B2 close"
-    tw = int(d.textlength(hint, font=ctx.font_s))
-    d.text((x1 - 10 - tw, y0 + 6), hint, font=ctx.font_s, fill=(225, 205, 197))
+    hint = "B1 confirm"
+    tw = int(d.textlength(hint, font=of))
+    d.text((x1 - 10 - tw, y0 + 6), hint, font=of, fill=(225, 205, 197))
     return img
 
 
@@ -1096,29 +1138,17 @@ def _draw_top_center_text(ctx, img: Image.Image, text: str) -> None:
         return
 
     d = ImageDraw.Draw(img)
+    of = _overlay_font(ctx)
     w, _h = img.size
-    lines = wrap_text(d, text, ctx.font_s, max_width=w - 24)[:2]
-    y = 64
+    lines = wrap_text(d, text, of, max_width=w - 24)[:2]
+    y = 58
 
     for line in lines:
-        tw = int(d.textlength(line, font=ctx.font_s))
+        tw = int(d.textlength(line, font=of))
         x = (w - tw) // 2
-        d.text((x + 1, y + 1), line, font=ctx.font_s, fill=(10, 8, 8, 220))
-        d.text((x, y), line, font=ctx.font_s, fill=(248, 238, 232, 235))
+        d.text((x + 1, y + 1), line, font=of, fill=(10, 8, 8, 220))
+        d.text((x, y), line, font=of, fill=(248, 238, 232, 235))
         y += 15
-
-
-def _draw_play_hint(ctx, img: Image.Image, st: PetState) -> None:
-    d = ImageDraw.Draw(img)
-    w, h = img.size
-    if st.alive:
-        hint = "Move stick. B1 actions. Hold B2 tutorial."
-    else:
-        hint = "Pet is gone. Press B1 to start over."
-    tw = int(d.textlength(hint, font=ctx.font_s))
-    x = max(8, (w - tw) // 2)
-    d.text((x + 1, h - 14), hint, font=ctx.font_s, fill=(10, 8, 8, 220))
-    d.text((x, h - 15), hint, font=ctx.font_s, fill=(232, 208, 200, 215))
 
 
 def render(ctx) -> Image.Image:
@@ -1142,7 +1172,6 @@ def render(ctx) -> Image.Image:
         d.text((w - tw - 10, h - 18), hint, font=ctx.font_s, fill=(245, 232, 226))
         return img
 
-    # MODE_PLAY
     img = _load_layered_room(ctx, st.room, (w, h)).convert("RGB")
     _draw_stats(ctx, img, st)
     _draw_top_info(ctx, img, st)
@@ -1182,5 +1211,4 @@ def render(ctx) -> Image.Image:
     if st.panel_open:
         img = _draw_action_panel(ctx, img, st, _dialogue_data(ctx))
 
-    _draw_play_hint(ctx, img, st)
     return img

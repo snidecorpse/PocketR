@@ -1,0 +1,4 @@
+# Local runtime state (do not commit)
+/.pocketr/
+/.pocketr*/
+/pocketr_settings.json
