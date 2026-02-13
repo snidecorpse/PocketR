@@ -4,11 +4,13 @@ import json
 import math
 import os
 import random
+import re
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from ..persistence import ensure_data_dir, read_json, write_json_atomic
 from ..ui_common import clamp, overlay_panel, wrap_text
@@ -39,13 +41,65 @@ K2_RECALL_SECONDS = 1.2
 B3_SHORT_MAX_SECONDS = 0.85
 PERSIST_SECONDS = 4.0
 
+PLAY_RECT_LEFT = 6
+PLAY_RECT_TOP = 74
+PLAY_RECT_RIGHT_PAD = 7
+PLAY_RECT_BOTTOM_PAD = 7
+PLAY_BOUNDS_TOP_PAD = 50
+PLAY_BOUNDS_BOTTOM_PAD = 2
+IDLE_SIT_SECONDS = 7.0
+ACTION_POSE_SECONDS = 6.0
+BLOCK_FLASH_SECONDS = 0.16
+DECAY_TUNE_MULT = 1.12
+
+DIALOGUE_CPS_DEFAULT = 31.0
+DIALOGUE_LINE_HOLD_SECONDS = 0.75
+SPRITE_SCALE_MIN = 0.85
+SPRITE_SCALE_MAX = 1.20
+SPRITE_SCALE_DEFAULT = 1.00
+SPRITE_SCALE_FROM_MEDIUM = 1.10
+SPRITE_SLOT_BY_ANIM: Dict[str, Tuple[int, int]] = {
+    "walk_anim": (56, 96),
+    "idle_happy_anim": (56, 96),
+    "idle_sad_anim": (56, 96),
+    "idle_sit_anim": (56, 96),
+    "talking_anim": (64, 96),
+    "shower_anim": (68, 98),
+    "sleeping_anim": (96, 64),
+    "changing_anim": (66, 98),
+    "gaming_anim": (60, 96),
+    "hugcuddle_anim": (74, 104),
+    "fallback": (56, 96),
+}
+SPRITE_CENTER_ANCHOR_ANIMS = {"sleeping_anim"}
+POSE_TO_ANIM_KEY = {
+    "sleep": "sleeping_anim",
+    "shower": "shower_anim",
+    "talk": "talking_anim",
+    "changing": "changing_anim",
+    "hugcuddle": "hugcuddle_anim",
+    "toilet": "fallback",
+}
+ANIM_FPS = {
+    "walk": 5.8,
+    "idle_happy": 4.9,
+    "idle_sad": 4.7,
+    "idle_sit": 4.2,
+    "talking": 5.7,
+    "shower": 5.0,
+    "sleeping": 4.0,
+    "changing": 4.9,
+    "gaming": 5.1,
+    "hugcuddle": 4.8,
+}
+
 
 ROOMS: Dict[str, Dict] = {
     ROOM_HUB: {
         "name": "Main Hall",
         "slug": "hub",
         "neighbors": {"LEFT": ROOM_ARCADE, "RIGHT": ROOM_BED, "UP": ROOM_BATH, "DOWN": ROOM_LIVING},
-        "actions": ["Check In", "Stretch", "Save & Quit"],
+        "actions": ["Check In", "Stretch", "Take Picture", "Save & Quit"],
         "color": (42, 24, 20),
     },
     ROOM_BED: {
@@ -73,42 +127,8 @@ ROOMS: Dict[str, Dict] = {
         "name": "Bathroom",
         "slug": "bathroom",
         "neighbors": {"DOWN": ROOM_HUB},
-        "actions": ["Use Toilet", "Shower"],
+        "actions": ["Use Toilet", "Shower", "Night Routine", "Change Clothes"],
         "color": (18, 42, 46),
-    },
-}
-
-
-ROOM_OBJECTS: Dict[str, List[str]] = {
-    "hub": ["obj_sign.png"],
-    "bedroom": ["obj_bed.png", "obj_pillow.png"],
-    "living": ["obj_couch.png", "obj_tv.png", "obj_table.png"],
-    "bathroom": ["obj_shower.png", "obj_toilet.png", "obj_sink.png"],
-    "arcade": ["obj_cabinet.png", "obj_console.png"],
-}
-
-
-OBJECT_LAYOUT: Dict[str, Dict[str, Tuple[int, int, int, int, Tuple[int, int, int]]]] = {
-    "hub": {
-        "obj_sign.png": (88, 130, 64, 34, (180, 122, 92)),
-    },
-    "bedroom": {
-        "obj_bed.png": (22, 134, 140, 66, (154, 84, 98)),
-        "obj_pillow.png": (128, 112, 58, 34, (224, 190, 200)),
-    },
-    "living": {
-        "obj_couch.png": (22, 150, 128, 56, (106, 86, 120)),
-        "obj_tv.png": (152, 106, 62, 48, (86, 100, 126)),
-        "obj_table.png": (128, 168, 84, 28, (162, 114, 86)),
-    },
-    "bathroom": {
-        "obj_shower.png": (18, 92, 64, 116, (94, 148, 162)),
-        "obj_toilet.png": (136, 142, 72, 56, (204, 210, 220)),
-        "obj_sink.png": (94, 108, 46, 42, (186, 196, 210)),
-    },
-    "arcade": {
-        "obj_cabinet.png": (24, 100, 64, 98, (132, 88, 170)),
-        "obj_console.png": (116, 128, 102, 70, (90, 94, 146)),
     },
 }
 
@@ -167,6 +187,13 @@ class PetState:
 
     msg: str = ""
     msg_until: float = 0.0
+    dialogue_active: bool = False
+    dialogue_queue: List[Dict[str, str]] = field(default_factory=list)
+    dialogue_line_idx: int = 0
+    dialogue_char_idx: int = 0
+    dialogue_cps: float = DIALOGUE_CPS_DEFAULT
+    dialogue_line_hold_until: float = 0.0
+    dialogue_started_at: float = 0.0
 
     walk_phase: float = 0.0
     pose: str = "idle"
@@ -181,6 +208,15 @@ class PetState:
 
     k3_hold_t0: float = 0.0
     k3_long_triggered: bool = False
+    hugs_given: int = 0
+    cuddles_shared: int = 0
+    talk_sessions: int = 0
+    arcade_sessions: int = 0
+    facing: int = 1
+    last_move_at: float = 0.0
+    sad_idle_t0: float = 0.0
+    edge_flash_until: float = 0.0
+    edge_flash_side: str = "NONE"
 
 
 def _state_fields() -> set:
@@ -206,6 +242,25 @@ def _asset_path(ctx, name: str) -> str:
     return ctx.asset("pet_game", name)
 
 
+def _play_rect(size: Tuple[int, int]) -> Tuple[int, int, int, int]:
+    w, h = int(size[0]), int(size[1])
+    x0 = PLAY_RECT_LEFT
+    y0 = PLAY_RECT_TOP
+    x1 = max(x0 + 20, w - PLAY_RECT_RIGHT_PAD)
+    y1 = max(y0 + 20, h - PLAY_RECT_BOTTOM_PAD)
+    return (x0, y0, x1, y1)
+
+
+def _play_bounds(size: Tuple[int, int]) -> Tuple[float, float]:
+    _x0, y0, _x1, y1 = _play_rect(size)
+    top_bound = float(y0 + PLAY_BOUNDS_TOP_PAD)
+    bottom_bound = float(y1 - PLAY_BOUNDS_BOTTOM_PAD)
+    if bottom_bound <= top_bound:
+        mid = float((y0 + y1) // 2)
+        return (mid, mid)
+    return (top_bound, bottom_bound)
+
+
 def _data_dialogue_path(ctx) -> str:
     if hasattr(ctx, "data_path"):
         return ctx.data_path(DIALOGUE_REL_PATH)
@@ -227,6 +282,8 @@ def _persist_state(ctx, st: PetState, force: bool = False) -> None:
 def _pet_defaults() -> Dict:
     return {
         "sim_speed": 1.0,
+        "sprite_global_scale": SPRITE_SCALE_DEFAULT,
+        "sprite_size_preset": "small",
         "difficulty_profile": "normal",
         "decay_hunger_mult": 1.0,
         "decay_energy_mult": 1.0,
@@ -255,6 +312,19 @@ def _pet_cfg(ctx) -> Dict:
         cfg["sim_speed"] = float(clamp(float(cfg.get("sim_speed", 1.0)), 0.5, 2.0))
     except Exception:
         cfg["sim_speed"] = 1.0
+
+    preset = str(cfg.get("sprite_size_preset", "small") or "small").strip().lower()
+    if preset not in ("small", "medium"):
+        preset = "small"
+    cfg["sprite_size_preset"] = preset
+    if "sprite_global_scale" in pg:
+        raw_scale = pg.get("sprite_global_scale", SPRITE_SCALE_DEFAULT)
+    else:
+        raw_scale = SPRITE_SCALE_FROM_MEDIUM if preset == "medium" else SPRITE_SCALE_DEFAULT
+    try:
+        cfg["sprite_global_scale"] = float(clamp(float(raw_scale), SPRITE_SCALE_MIN, SPRITE_SCALE_MAX))
+    except Exception:
+        cfg["sprite_global_scale"] = SPRITE_SCALE_DEFAULT
 
     prof = str(cfg.get("difficulty_profile", "normal") or "normal").strip().lower()
     if prof not in ("easy", "normal", "hard", "custom"):
@@ -334,6 +404,13 @@ def init(ctx):
     st.minigame_state = {}
     st.msg = ""
     st.msg_until = 0.0
+    st.dialogue_active = False
+    st.dialogue_queue = []
+    st.dialogue_line_idx = 0
+    st.dialogue_char_idx = 0
+    st.dialogue_cps = DIALOGUE_CPS_DEFAULT
+    st.dialogue_line_hold_until = 0.0
+    st.dialogue_started_at = 0.0
 
     st.k2_hold_t0 = 0.0
     st.k2_long_triggered = False
@@ -341,10 +418,15 @@ def init(ctx):
     st.k3_long_triggered = False
 
     st.last_tick = now
+    if st.last_move_at <= 0.0:
+        st.last_move_at = now
+    st.sad_idle_t0 = 0.0
 
     w, h = int(ctx.disp.width), int(ctx.disp.height)
-    st.x = float(clamp(st.x, 12.0, float(w - 12)))
-    st.y = float(clamp(st.y, 92.0, float(h - 14)))
+    x0, _y0, x1, _y1 = _play_rect((w, h))
+    top_bound, bottom_bound = _play_bounds((w, h))
+    st.x = float(clamp(st.x, float(x0 + 8), float(x1 - 8)))
+    st.y = float(clamp(st.y, top_bound, bottom_bound))
 
     ctx.user["pet_game_v3"] = _to_dict(st)
 
@@ -362,16 +444,153 @@ def _save(ctx, st: PetState, force_persist: bool = False) -> None:
     _persist_state(ctx, st, force=force_persist)
 
 
-def _placeholder_sprite(size: int, label: str) -> Image.Image:
-    img = Image.new("RGBA", (size, size), (16, 14, 20, 255))
+def _placeholder_sprite(size, label: str) -> Image.Image:
+    if isinstance(size, tuple):
+        sw = max(8, int(size[0]))
+        sh = max(8, int(size[1]))
+    else:
+        sw = max(8, int(size))
+        sh = sw
+
+    img = Image.new("RGBA", (sw, sh), (16, 14, 20, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([1, 1, size - 2, size - 2], radius=max(5, size // 7), fill=(56, 38, 42, 255), outline=(255, 215, 205, 210), width=2)
-    d.ellipse([size // 4, size // 6, size - size // 4, size - size // 3], fill=(255, 210, 175, 255), outline=(36, 18, 10, 220), width=2)
-    d.text((6, size - 14), label.upper(), fill=(255, 244, 240, 230))
+    d.rounded_rectangle([1, 1, sw - 2, sh - 2], radius=max(5, min(sw, sh) // 8), fill=(56, 38, 42, 255), outline=(255, 215, 205, 210), width=2)
+    head_w = max(10, sw // 2)
+    head_h = max(10, sh // 3)
+    hx0 = (sw - head_w) // 2
+    hy0 = max(6, sh // 7)
+    d.ellipse([hx0, hy0, hx0 + head_w, hy0 + head_h], fill=(255, 210, 175, 255), outline=(36, 18, 10, 220), width=2)
+    d.text((6, max(0, sh - 14)), label.upper(), fill=(255, 244, 240, 230))
     return img
 
 
-def _load_sprites(ctx, px: int) -> Dict[str, Image.Image]:
+def _sprite_resample():
+    if hasattr(Image, "Resampling"):
+        return Image.Resampling.NEAREST
+    return Image.NEAREST
+
+
+def _sprite_global_scale(ctx) -> float:
+    cfg = _pet_cfg(ctx)
+    try:
+        return float(clamp(float(cfg.get("sprite_global_scale", SPRITE_SCALE_DEFAULT)), SPRITE_SCALE_MIN, SPRITE_SCALE_MAX))
+    except Exception:
+        return SPRITE_SCALE_DEFAULT
+
+
+def _scaled_slot(slot: Tuple[int, int], global_scale: float) -> Tuple[int, int]:
+    sw = max(1, int(round(float(slot[0]) * float(global_scale))))
+    sh = max(1, int(round(float(slot[1]) * float(global_scale))))
+    return (sw, sh)
+
+
+def _normalize_anim_frames(
+    frames: List[Image.Image],
+    slot: Tuple[int, int],
+    global_scale: float,
+    center_anchor: bool = False,
+) -> List[Image.Image]:
+    if not frames:
+        return []
+
+    slot_w = max(1, int(slot[0]))
+    slot_h = max(1, int(slot[1]))
+    canvas_w, canvas_h = _scaled_slot(slot, global_scale)
+
+    min_l = 10**9
+    min_t = 10**9
+    max_r = -1
+    max_b = -1
+    bboxes: List[Optional[Tuple[int, int, int, int]]] = []
+    for fr in frames:
+        if not isinstance(fr, Image.Image):
+            bboxes.append(None)
+            continue
+        bb = fr.getbbox()
+        bboxes.append(bb)
+        if not bb:
+            continue
+        min_l = min(min_l, int(bb[0]))
+        min_t = min(min_t, int(bb[1]))
+        max_r = max(max_r, int(bb[2]))
+        max_b = max(max_b, int(bb[3]))
+
+    if max_r <= min_l or max_b <= min_t:
+        return [Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0)) for _ in frames]
+
+    canon_w = max(1, max_r - min_l)
+    canon_h = max(1, max_b - min_t)
+    set_scale = min(float(slot_w) / float(canon_w), float(slot_h) / float(canon_h))
+    final_scale = max(0.01, set_scale * float(global_scale))
+    nw = max(1, int(round(float(canon_w) * final_scale)))
+    nh = max(1, int(round(float(canon_h) * final_scale)))
+
+    out: List[Image.Image] = []
+    for fr, bb in zip(frames, bboxes):
+        canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        if not isinstance(fr, Image.Image) or not bb:
+            out.append(canvas)
+            continue
+
+        crop = fr.crop((min_l, min_t, max_r, max_b))
+        resized = crop.resize((nw, nh), _sprite_resample())
+        px = (canvas_w - nw) // 2
+        py = (canvas_h - nh) // 2 if center_anchor else (canvas_h - nh)
+        canvas.paste(resized, (px, py), resized)
+        out.append(canvas)
+    return out
+
+
+def _anim_frame_paths(ctx, subdir: str) -> List[str]:
+    root = ctx.asset("pet_game", "Sprites", subdir)
+    paths: List[str] = []
+    if os.path.isdir(root):
+        for name in sorted(os.listdir(root)):
+            low = name.lower()
+            if not low.endswith(".png"):
+                continue
+            if not low.startswith("frame_"):
+                continue
+            paths.append(os.path.join(root, name))
+    return paths
+
+
+def _first_anim_paths(ctx, names: List[str]) -> Tuple[str, List[str]]:
+    for name in names:
+        paths = _anim_frame_paths(ctx, name)
+        if paths:
+            return name, paths
+    return "", []
+
+
+def _load_anim_frames(paths: List[str]) -> List[Image.Image]:
+    frames: List[Image.Image] = []
+    for p in paths:
+        try:
+            fr = Image.open(p).convert("RGBA")
+            frames.append(fr)
+        except Exception:
+            pass
+    return frames
+
+
+def _mirror_frames(frames: List[Image.Image]) -> List[Image.Image]:
+    out: List[Image.Image] = []
+    for fr in frames:
+        if isinstance(fr, Image.Image):
+            out.append(ImageOps.mirror(fr))
+    return out
+
+
+def _set_anim_pair(sprites: Dict[str, object], key: str, frames: List[Image.Image]) -> None:
+    cleaned = [fr for fr in frames if isinstance(fr, Image.Image)]
+    sprites[key] = cleaned
+    sprites[f"{key}_r"] = cleaned
+    sprites[f"{key}_l"] = _mirror_frames(cleaned)
+
+
+def _load_sprites(ctx) -> Dict[str, object]:
+    global_scale = _sprite_global_scale(ctx)
     mtags: List[str] = []
     for k, fname in SPRITE_FILES.items():
         p = _asset_path(ctx, fname)
@@ -380,21 +599,147 @@ def _load_sprites(ctx, px: int) -> Dict[str, Image.Image]:
         except Exception:
             mtags.append(f"{k}:0")
 
-    key = f"{px}|" + "|".join(mtags)
+    anim_sources = {
+        "walking": ["Walking"],
+        "shower_anim": ["Shower"],
+        "gaming_anim": ["Gaming"],
+        "idle_happy_anim": ["IdleHappy"],
+        "idle_sad_anim": ["IdleSad"],
+        "idle_sit_anim": ["IdleSitting", "IdleSit", "Sitting"],
+        "talking_anim": ["Talking"],
+        "changing_anim": ["Changing"],
+        "sleeping_anim": ["Sleeping"],
+        "hugcuddle_anim": ["HugCuddle"],
+    }
+
+    anim_paths: Dict[str, List[str]] = {}
+    for tag, names in anim_sources.items():
+        subdir, paths = _first_anim_paths(ctx, names)
+        anim_paths[tag] = paths
+        if subdir:
+            root = ctx.asset("pet_game", "Sprites", subdir)
+            try:
+                mtags.append(f"{subdir}:{int(os.path.getmtime(root))}")
+            except Exception:
+                mtags.append(f"{subdir}:0")
+        for p in paths:
+            try:
+                mtags.append(f"{tag}:{int(os.path.getmtime(p))}:{os.path.basename(p)}")
+            except Exception:
+                mtags.append(f"{tag}:0:{os.path.basename(p)}")
+
+    key = f"slot-v2:{global_scale:.2f}|" + "|".join(mtags)
     cache = ctx.user.get("_pet_sprite_cache", None)
     if isinstance(cache, dict) and cache.get("key") == key and isinstance(cache.get("data"), dict):
         return cache["data"]
 
-    sprites: Dict[str, Image.Image] = {}
-    for k, fname in SPRITE_FILES.items():
-        p = _asset_path(ctx, fname)
+    fallback_slot = SPRITE_SLOT_BY_ANIM["fallback"]
+    fallback_center = "sleeping_anim" in SPRITE_CENTER_ANCHOR_ANIMS
+
+    def _single_from_path(name: str, slot_key: str, center_anchor: bool = False) -> Image.Image:
+        slot = SPRITE_SLOT_BY_ANIM.get(slot_key, fallback_slot)
+        p = _asset_path(ctx, name)
         try:
-            sp = Image.open(p).convert("RGBA")
-            if sp.size != (px, px):
-                sp = sp.resize((px, px))
-            sprites[k] = sp
+            src = Image.open(p).convert("RGBA")
+            norm = _normalize_anim_frames([src], slot, global_scale, center_anchor=center_anchor)
+            if norm:
+                return norm[0]
         except Exception:
-            sprites[k] = _placeholder_sprite(px, k)
+            pass
+        return _placeholder_sprite(_scaled_slot(slot, global_scale), name.split(".")[0])
+
+    sprites: Dict[str, object] = {}
+    sprites["idle"] = _single_from_path("idle.png", "fallback")
+    sprites["walk1"] = _single_from_path("walk1.png", "fallback")
+    sprites["walk2"] = _single_from_path("walk2.png", "fallback")
+    sprites["sleep"] = _single_from_path("sleep.png", "fallback", center_anchor=fallback_center)
+    sprites["shower"] = _single_from_path("shower.png", "fallback")
+    sprites["toilet"] = _single_from_path("toilet.png", "fallback")
+
+    walk_anim_r = _normalize_anim_frames(
+        _load_anim_frames(anim_paths.get("walking", [])),
+        SPRITE_SLOT_BY_ANIM["walk_anim"],
+        global_scale,
+    )
+    shower_anim = _normalize_anim_frames(
+        _load_anim_frames(anim_paths.get("shower_anim", [])),
+        SPRITE_SLOT_BY_ANIM["shower_anim"],
+        global_scale,
+    )
+    gaming_anim = _normalize_anim_frames(
+        _load_anim_frames(anim_paths.get("gaming_anim", [])),
+        SPRITE_SLOT_BY_ANIM["gaming_anim"],
+        global_scale,
+    )
+    idle_happy_anim = _normalize_anim_frames(
+        _load_anim_frames(anim_paths.get("idle_happy_anim", [])),
+        SPRITE_SLOT_BY_ANIM["idle_happy_anim"],
+        global_scale,
+    )
+    idle_sad_anim = _normalize_anim_frames(
+        _load_anim_frames(anim_paths.get("idle_sad_anim", [])),
+        SPRITE_SLOT_BY_ANIM["idle_sad_anim"],
+        global_scale,
+    )
+    idle_sit_anim = _normalize_anim_frames(
+        _load_anim_frames(anim_paths.get("idle_sit_anim", [])),
+        SPRITE_SLOT_BY_ANIM["idle_sit_anim"],
+        global_scale,
+    )
+    talking_anim = _normalize_anim_frames(
+        _load_anim_frames(anim_paths.get("talking_anim", [])),
+        SPRITE_SLOT_BY_ANIM["talking_anim"],
+        global_scale,
+    )
+    changing_anim = _normalize_anim_frames(
+        _load_anim_frames(anim_paths.get("changing_anim", [])),
+        SPRITE_SLOT_BY_ANIM["changing_anim"],
+        global_scale,
+    )
+    sleeping_anim = _normalize_anim_frames(
+        _load_anim_frames(anim_paths.get("sleeping_anim", [])),
+        SPRITE_SLOT_BY_ANIM["sleeping_anim"],
+        global_scale,
+        center_anchor=True,
+    )
+    hugcuddle_anim = _normalize_anim_frames(
+        _load_anim_frames(anim_paths.get("hugcuddle_anim", [])),
+        SPRITE_SLOT_BY_ANIM["hugcuddle_anim"],
+        global_scale,
+    )
+
+    if walk_anim_r:
+        sprites["walk_anim_r"] = walk_anim_r
+        sprites["walk_anim_l"] = [ImageOps.mirror(fr) for fr in walk_anim_r]
+    else:
+        fallback_w1 = sprites.get("walk1")
+        fallback_w2 = sprites.get("walk2")
+        frames: List[Image.Image] = []
+        if isinstance(fallback_w1, Image.Image):
+            frames.append(fallback_w1)
+        if isinstance(fallback_w2, Image.Image):
+            frames.append(fallback_w2)
+        if not frames and isinstance(sprites.get("idle"), Image.Image):
+            frames = [sprites["idle"]]
+        sprites["walk_anim_r"] = frames
+        sprites["walk_anim_l"] = [ImageOps.mirror(fr) for fr in frames] if frames else []
+
+    fallback_idle = sprites.get("idle")
+    fallback_idle_frames = [fallback_idle] if isinstance(fallback_idle, Image.Image) else []
+    fallback_sleep = sprites.get("sleep")
+    fallback_sleep_frames = [fallback_sleep] if isinstance(fallback_sleep, Image.Image) else fallback_idle_frames
+    fallback_sh = sprites.get("shower")
+    fallback_sh_frames = [fallback_sh] if isinstance(fallback_sh, Image.Image) else fallback_idle_frames
+
+    _set_anim_pair(sprites, "shower_anim", shower_anim if shower_anim else fallback_sh_frames)
+    _set_anim_pair(sprites, "gaming_anim", gaming_anim if gaming_anim else fallback_idle_frames)
+    _set_anim_pair(sprites, "idle_happy_anim", idle_happy_anim if idle_happy_anim else fallback_idle_frames)
+    _set_anim_pair(sprites, "idle_sad_anim", idle_sad_anim if idle_sad_anim else fallback_idle_frames)
+    _set_anim_pair(sprites, "idle_sit_anim", idle_sit_anim if idle_sit_anim else list(sprites.get("idle_happy_anim", [])))
+    _set_anim_pair(sprites, "talking_anim", talking_anim if talking_anim else list(sprites.get("idle_happy_anim", [])))
+    _set_anim_pair(sprites, "changing_anim", changing_anim if changing_anim else list(sprites.get("idle_happy_anim", [])))
+    _set_anim_pair(sprites, "sleeping_anim", sleeping_anim if sleeping_anim else fallback_sleep_frames)
+    _set_anim_pair(sprites, "hugcuddle_anim", hugcuddle_anim if hugcuddle_anim else list(sprites.get("talking_anim", [])))
 
     ctx.user["_pet_sprite_cache"] = {"key": key, "data": sprites}
     return sprites
@@ -424,7 +769,13 @@ def _dialogue_data(ctx) -> Dict[str, List[Dict]]:
 
     try:
         with open(source, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+            raw_text = f.read()
+        try:
+            raw = json.loads(raw_text)
+        except Exception:
+            # Be tolerant of trailing commas in editable dialogue JSON.
+            relaxed = re.sub(r",(\s*[}\]])", r"\1", raw_text)
+            raw = json.loads(relaxed)
         if isinstance(raw, dict):
             for k, v in raw.items():
                 if not isinstance(v, list):
@@ -440,8 +791,9 @@ def _dialogue_data(ctx) -> Dict[str, List[Dict]]:
 
     if not data:
         data = {
-            "greeting": [{"player": "Hey buddy!", "pet": "Hey! Good to see you.", "social": 3, "fun": 2}],
-            "feelings": [{"player": "How are you?", "pet": "Better when we hang out.", "social": 2, "fun": 1}],
+            "greeting": [{"player": "Hey love, I missed you.", "pet": "I missed you too, come here.", "social": 4, "fun": 2}],
+            "feelings": [{"player": "How are you feeling?", "pet": "Better when we talk like this.", "social": 3, "fun": 1}],
+            "reassurance": [{"player": "I am proud of you.", "pet": "That means a lot to me.", "social": 4, "fun": 1}],
         }
 
     ctx.user["_pet_dialogue_cache"] = {"key": key, "data": data}
@@ -458,21 +810,176 @@ def _make_message(st: PetState, text: str, now: float, seconds: float = 2.4) -> 
     st.msg_until = now + max(0.8, float(seconds))
 
 
+def _dialogue_line_text(entry: Dict[str, str]) -> str:
+    speaker = str(entry.get("speaker", "") or "").strip()
+    text = str(entry.get("text", "") or "").strip()
+    if speaker and text:
+        return f"{speaker}: {text}"
+    if text:
+        return text
+    return speaker
+
+
+def _clear_dialogue(st: PetState) -> None:
+    st.dialogue_active = False
+    st.dialogue_queue = []
+    st.dialogue_line_idx = 0
+    st.dialogue_char_idx = 0
+    st.dialogue_line_hold_until = 0.0
+    st.dialogue_started_at = 0.0
+
+
+def _estimate_dialogue_seconds(lines: List[Dict[str, str]], cps: float, hold_seconds: float) -> float:
+    total = 0.0
+    c = max(8.0, float(cps))
+    hold = max(0.05, float(hold_seconds))
+    for ln in lines:
+        total += (len(_dialogue_line_text(ln)) / c) + hold + 0.05
+    return max(0.9, total)
+
+
+def _queue_scene_lines(
+    st: PetState,
+    lines: List[Dict[str, str]],
+    now: float,
+    cps: float = DIALOGUE_CPS_DEFAULT,
+    hold_seconds: float = DIALOGUE_LINE_HOLD_SECONDS,
+    pose: str = "",
+    min_pose_seconds: float = 0.0,
+) -> None:
+    cleaned: List[Dict[str, str]] = []
+    for ln in lines:
+        if not isinstance(ln, dict):
+            continue
+        speaker = str(ln.get("speaker", "") or "").strip()
+        text = str(ln.get("text", "") or "").strip()
+        if not text and not speaker:
+            continue
+        cleaned.append({"speaker": speaker, "text": text})
+
+    if not cleaned:
+        _clear_dialogue(st)
+        return
+
+    base_hold = max(0.05, float(hold_seconds))
+    estimated = _estimate_dialogue_seconds(cleaned, float(cps), base_hold)
+    target_total = estimated
+    if pose:
+        target_total = max(estimated, float(min_pose_seconds))
+    if target_total > estimated and cleaned:
+        base_hold += (target_total - estimated) / float(len(cleaned))
+
+    for ln in cleaned:
+        ln["hold"] = float(base_hold)
+
+    st.dialogue_active = True
+    st.dialogue_queue = cleaned
+    st.dialogue_line_idx = 0
+    st.dialogue_char_idx = 0
+    st.dialogue_cps = max(8.0, float(cps))
+    st.dialogue_line_hold_until = 0.0
+    st.dialogue_started_at = now
+    st.msg = ""
+    st.msg_until = 0.0
+
+    if pose:
+        _set_pose(st, pose, target_total, now)
+
+
+def _queue_scene_text(
+    st: PetState,
+    text: str,
+    now: float,
+    speaker: str = "",
+    cps: float = DIALOGUE_CPS_DEFAULT,
+    hold_seconds: float = DIALOGUE_LINE_HOLD_SECONDS,
+    pose: str = "",
+    min_pose_seconds: float = 0.0,
+) -> None:
+    _queue_scene_lines(
+        st,
+        [{"speaker": speaker, "text": str(text)}],
+        now=now,
+        cps=cps,
+        hold_seconds=hold_seconds,
+        pose=pose,
+        min_pose_seconds=min_pose_seconds,
+    )
+
+
+def _advance_dialogue_line(st: PetState, now: float) -> None:
+    st.dialogue_line_idx += 1
+    if st.dialogue_line_idx >= len(st.dialogue_queue):
+        _clear_dialogue(st)
+        return
+    st.dialogue_char_idx = 0
+    st.dialogue_line_hold_until = 0.0
+    st.dialogue_started_at = now
+
+
+def _update_dialogue_playback(st: PetState, dt: float, now: float, ev: Dict[str, bool]) -> bool:
+    if not st.dialogue_active:
+        return False
+    if st.dialogue_line_idx < 0 or st.dialogue_line_idx >= len(st.dialogue_queue):
+        _clear_dialogue(st)
+        return False
+
+    line = _dialogue_line_text(st.dialogue_queue[st.dialogue_line_idx])
+    line_len = len(line)
+    if line_len <= 0:
+        _advance_dialogue_line(st, now)
+        return False
+
+    confirm = ("K1" in ev) or ("PRESS" in ev)
+    if confirm:
+        if st.dialogue_char_idx < line_len:
+            st.dialogue_char_idx = line_len
+            st.dialogue_line_hold_until = max(float(st.dialogue_line_hold_until), now + 0.05)
+        else:
+            _advance_dialogue_line(st, now)
+        return True
+
+    if st.dialogue_char_idx < line_len:
+        elapsed = max(0.0, now - float(st.dialogue_started_at))
+        chars = int(elapsed * max(8.0, float(st.dialogue_cps)))
+        st.dialogue_char_idx = max(st.dialogue_char_idx, min(line_len, chars))
+
+    hold_for_line = DIALOGUE_LINE_HOLD_SECONDS
+    try:
+        hold_for_line = float(st.dialogue_queue[st.dialogue_line_idx].get("hold", DIALOGUE_LINE_HOLD_SECONDS))
+    except Exception:
+        hold_for_line = DIALOGUE_LINE_HOLD_SECONDS
+    hold_for_line = max(0.05, hold_for_line)
+
+    if st.dialogue_char_idx >= line_len:
+        if st.dialogue_line_hold_until <= 0.0:
+            st.dialogue_line_hold_until = now + hold_for_line
+        if now >= float(st.dialogue_line_hold_until):
+            _advance_dialogue_line(st, now)
+
+    return False
+
+
 def _enter_room(st: PetState, room: str, side: str, w: int, h: int, now: float) -> None:
     st.room = room
-    top_bound = 88.0
-    bottom_bound = float(h - 12)
+    x0, _y0, x1, _y1 = _play_rect((w, h))
+    top_bound, bottom_bound = _play_bounds((w, h))
 
     if side == "LEFT":
-        st.x = float(w - 14)
+        st.x = float(x1 - 8)
     elif side == "RIGHT":
-        st.x = 14.0
+        st.x = float(x0 + 8)
     elif side == "UP":
-        st.y = float(bottom_bound - 4)
+        st.y = float(bottom_bound - 2)
     elif side == "DOWN":
-        st.y = float(top_bound + 4)
+        st.y = float(top_bound + 2)
 
-    _make_message(st, f"Entered {ROOMS.get(room, {}).get('name', room)}", now, seconds=1.2)
+    _make_message(st, f"You and him moved into {ROOMS.get(room, {}).get('name', room)}.", now, seconds=1.2)
+
+
+def _trigger_edge_flash(st: PetState, side: str, now: float) -> None:
+    st.edge_flash_side = str(side).upper()
+    st.edge_flash_until = now + BLOCK_FLASH_SECONDS
 
 
 def _apply_movement(ctx, st: PetState, dt: float, now: float) -> bool:
@@ -488,6 +995,11 @@ def _apply_movement(ctx, st: PetState, dt: float, now: float) -> bool:
     if mx == 0 and my == 0:
         return False
 
+    if mx < 0:
+        st.facing = -1
+    elif mx > 0:
+        st.facing = 1
+
     mlen = math.sqrt(float(mx * mx + my * my))
     if mlen > 0:
         mx = float(mx) / mlen
@@ -499,25 +1011,27 @@ def _apply_movement(ctx, st: PetState, dt: float, now: float) -> bool:
     st.walk_phase += dt * 8.0
 
     w, h = int(ctx.disp.width), int(ctx.disp.height)
-    top_bound = 88.0
-    bottom_bound = float(h - 12)
-    edge = 12.0
+    x0, _y0, x1, _y1 = _play_rect((w, h))
+    top_bound, bottom_bound = _play_bounds((w, h))
+    edge = 10.0
 
     room_info = ROOMS.get(st.room, ROOMS[ROOM_HUB])
     neigh = room_info.get("neighbors", {})
 
-    if st.x < -edge:
+    if st.x < (float(x0) - edge):
         nxt = neigh.get("LEFT")
         if nxt:
             _enter_room(st, str(nxt), "LEFT", w, h, now)
         else:
-            st.x = 8.0
-    elif st.x > float(w + edge):
+            st.x = float(x0 + 2)
+            _trigger_edge_flash(st, "LEFT", now)
+    elif st.x > (float(x1) + edge):
         nxt = neigh.get("RIGHT")
         if nxt:
             _enter_room(st, str(nxt), "RIGHT", w, h, now)
         else:
-            st.x = float(w - 8)
+            st.x = float(x1 - 2)
+            _trigger_edge_flash(st, "RIGHT", now)
 
     if st.y < (top_bound - edge):
         nxt = neigh.get("UP")
@@ -525,12 +1039,14 @@ def _apply_movement(ctx, st: PetState, dt: float, now: float) -> bool:
             _enter_room(st, str(nxt), "UP", w, h, now)
         else:
             st.y = top_bound + 2
+            _trigger_edge_flash(st, "UP", now)
     elif st.y > (bottom_bound + edge):
         nxt = neigh.get("DOWN")
         if nxt:
             _enter_room(st, str(nxt), "DOWN", w, h, now)
         else:
             st.y = bottom_bound - 2
+            _trigger_edge_flash(st, "DOWN", now)
 
     return True
 
@@ -544,12 +1060,12 @@ def _base_drain_per_hour(cfg: Dict) -> Dict[str, float]:
         profile_decay = 1.20
 
     return {
-        "hunger": 5.0,
-        "energy": 4.2,
-        "hygiene": 2.4,
-        "social": 2.0,
-        "fun": 2.2,
-        "bladder": 4.6,
+        "hunger": 5.0 * DECAY_TUNE_MULT,
+        "energy": 4.2 * DECAY_TUNE_MULT,
+        "hygiene": 2.4 * DECAY_TUNE_MULT,
+        "social": 2.0 * DECAY_TUNE_MULT,
+        "fun": 2.2 * DECAY_TUNE_MULT,
+        "bladder": 4.6 * DECAY_TUNE_MULT,
         "profile_decay": profile_decay,
     }
 
@@ -656,7 +1172,7 @@ def _apply_decay(st: PetState, dt: float, moving: bool, now: float, cfg: Dict) -
         }
         reason = min(lowest, key=lowest.get)
         st.death_reason = reason
-        _make_message(st, f"Your pet passed away from low {reason}. Press B1 to restart.", now, 8.0)
+        _make_message(st, f"He faded away from low {reason}. Press B1 to restart.", now, 8.0)
 
 
 def _boost(st: PetState, **kwargs: float) -> None:
@@ -670,53 +1186,67 @@ def _boost(st: PetState, **kwargs: float) -> None:
 def _run_action(st: PetState, action: str, now: float) -> str:
     if action == "Check In":
         _boost(st, social=3, mood=2, fun=1)
-        return "Quick check-in. Calm and steady."
+        return "You checked in on him. He smiles right away."
 
     if action == "Stretch":
         _boost(st, energy=2, mood=1, fun=1)
-        return "Short stretch done."
+        return "You and him did a tiny stretch break."
 
     if action == "Cuddle":
         _boost(st, social=8, mood=6, energy=-2, fun=3)
-        return "Cuddle time. Feels safer."
+        st.cuddles_shared = int(st.cuddles_shared) + 1
+        _set_pose(st, "hugcuddle", ACTION_POSE_SECONDS, now)
+        return "Cuddle time. He feels safe and warm with you."
 
     if action == "Give Hug":
         _boost(st, social=7, mood=5, fun=2, energy=-1)
-        return "Big hug delivered."
+        st.hugs_given = int(st.hugs_given) + 1
+        _set_pose(st, "hugcuddle", ACTION_POSE_SECONDS, now)
+        return "Big hug delivered. He looks extra happy."
 
     if action == "Sleep":
         _boost(st, energy=14, mood=4, hunger=-3, bladder=-5)
-        _set_pose(st, "sleep", 2.8, now)
-        return "Nap started. Energy rising."
+        _set_pose(st, "sleep", ACTION_POSE_SECONDS, now)
+        return "Nap time. He is recovering energy."
 
     if action == "Watch TV":
         _boost(st, fun=7, social=1, energy=-2, hunger=-1)
-        return "TV time. Mood up."
+        return "Cozy TV time together."
 
     if action == "Lounge":
         _boost(st, energy=6, mood=3, fun=2, bladder=-2)
-        return "Lounge break complete."
+        return "Lounge time. Calm, close, comfy."
 
     if action in ("Runner Dash", "Memory Match", "Brick Breaker"):
-        return "Launching mini-game..."
+        return "Arcade game starting."
 
     if action == "Use Toilet":
         _boost(st, bladder=38, hygiene=-3, mood=1)
-        st.blur_until = now + 1.8
-        _set_pose(st, "toilet", 1.8, now)
+        st.blur_until = now + 2.0
+        _set_pose(st, "toilet", 2.0, now)
         return "Woah look away. Privacy moment."
 
     if action == "Shower":
         _boost(st, hygiene=34, mood=5, energy=-3)
-        _set_pose(st, "shower", 1.9, now)
-        return "Fresh and clean."
+        _set_pose(st, "shower", ACTION_POSE_SECONDS, now)
+        return "Shower done. He feels fresh and clean."
 
-    return "Nothing happened."
+    if action == "Night Routine":
+        _boost(st, hygiene=18, energy=11, mood=7, social=2, bladder=-6, hunger=-3)
+        _set_pose(st, "changing", ACTION_POSE_SECONDS, now)
+        return "Night routine complete. Cozy mode unlocked."
+
+    if action == "Change Clothes":
+        _boost(st, mood=5, hygiene=2, social=1)
+        _set_pose(st, "changing", ACTION_POSE_SECONDS, now)
+        return "Outfit change done. He looks so good."
+
+    return "He waits for your next move."
 
 
 def _panel_items(st: PetState, dialogue: Dict[str, List[Dict]]) -> List[str]:
     if st.panel_kind == "TALK":
-        cats = sorted(list(dialogue.keys()))
+        cats = list(dialogue.keys())
         return cats or ["greeting"]
 
     room_info = ROOMS.get(st.room, ROOMS[ROOM_HUB])
@@ -726,11 +1256,12 @@ def _panel_items(st: PetState, dialogue: Dict[str, List[Dict]]) -> List[str]:
     return []
 
 
-def _talk_once(st: PetState, dialogue: Dict[str, List[Dict]], category: str) -> str:
+def _talk_once(st: PetState, dialogue: Dict[str, List[Dict]], category: str, now: float) -> Tuple[str, str]:
     entries = dialogue.get(category, [])
     if not entries:
         _boost(st, social=2, mood=1)
-        return "You talked for a while."
+        st.talk_sessions = int(st.talk_sessions) + 1
+        return ("Hey love.", "I missed you.")
 
     idx = st.talk_index % len(entries)
     st.talk_index += 1
@@ -742,7 +1273,8 @@ def _talk_once(st: PetState, dialogue: Dict[str, List[Dict]], category: str) -> 
     fun_gain = float(line.get("fun", 2))
 
     _boost(st, social=social_gain, fun=fun_gain, mood=2)
-    return f"You: {user_line} | Pet: {pet_line}"
+    st.talk_sessions = int(st.talk_sessions) + 1
+    return (user_line, pet_line)
 
 
 def _handle_short_long(st: PetState, now: float, ev: Dict[str, bool], inputs, key: str, hold_attr: str, long_attr: str, long_seconds: float) -> str:
@@ -774,48 +1306,158 @@ def _handle_short_long(st: PetState, now: float, ev: Dict[str, bool], inputs, ke
     return "NONE"
 
 
-def _quick_support(st: PetState, now: float) -> None:
-    lines = [
-        "You gave a quick pep talk.",
-        "A little encouragement helped.",
-        "He smiles. That helped.",
-        "Quick check-in: feeling better.",
-    ]
+def _quick_support(st: PetState, now: float, dialogue: Optional[Dict[str, List[Dict]]] = None) -> None:
+    lines: List[str] = []
+    if isinstance(dialogue, dict):
+        for cat in ("reassurance", "flirty", "greeting", "feelings"):
+            for item in dialogue.get(cat, []):
+                if isinstance(item, dict):
+                    pet_line = str(item.get("pet", "")).strip()
+                    if pet_line:
+                        lines.append(pet_line)
+    if not lines:
+        lines = [
+            "I missed you too. Come here.",
+            "Better now that you checked in.",
+            "I feel seen and cared for.",
+            "Tiny check-in, big comfort.",
+        ]
     _boost(st, mood=1.5, social=1.0)
-    _make_message(st, random.choice(lines), now, 1.5)
+    _queue_scene_text(
+        st,
+        random.choice(lines),
+        now=now,
+        speaker="Him",
+        pose="talk",
+        min_pose_seconds=ACTION_POSE_SECONDS,
+    )
 
 
 def _quick_care(st: PetState, now: float) -> None:
     if st.hunger < 50:
         _boost(st, hunger=4, mood=1)
-        _make_message(st, "Quick snack delivered.", now, 1.6)
+        _queue_scene_text(st, "You brought him a quick snack. He needed that.", now=now)
         return
     if st.energy < 50:
         _boost(st, energy=4, mood=1)
-        _make_message(st, "Short rest helped.", now, 1.6)
+        _queue_scene_text(st, "You told him to rest a little.", now=now)
         return
     if st.hygiene < 45:
         _boost(st, hygiene=5, mood=1)
-        _make_message(st, "Quick tidy-up done.", now, 1.6)
+        _queue_scene_text(st, "Quick tidy-up done. He feels better.", now=now)
         return
     if st.social < 45 or st.fun < 45:
         _boost(st, social=3, fun=3, mood=1)
-        _make_message(st, "Quick play break.", now, 1.6)
+        _queue_scene_text(st, "A quick little date break helped him.", now=now)
         return
 
     _boost(st, mood=2, health=0.3)
-    _make_message(st, "Quick care done.", now, 1.5)
+    _queue_scene_text(st, "Quick care and affection delivered.", now=now)
+
+
+def _capture_gallery_dir(ctx) -> str:
+    if hasattr(ctx, "data_path"):
+        root = ctx.data_path("gallery")
+    else:
+        root = os.path.join(ensure_data_dir(ctx), "gallery")
+    try:
+        os.makedirs(root, exist_ok=True)
+    except Exception:
+        pass
+    return root
+
+
+def _sprite_draw_pos(st: PetState, sprite: Image.Image) -> Tuple[int, int]:
+    px = int(st.x - (sprite.width // 2))
+    if st.pose == "sleep":
+        py = int(st.y - (sprite.height // 2))
+    else:
+        py = int(st.y - sprite.height)
+    return px, py
+
+
+def _clamp_pose_x(ctx, st: PetState, now: float) -> None:
+    if now >= float(st.pose_until):
+        return
+    anim_key = POSE_TO_ANIM_KEY.get(str(st.pose))
+    if not anim_key:
+        return
+
+    slot = SPRITE_SLOT_BY_ANIM.get(anim_key, SPRITE_SLOT_BY_ANIM["fallback"])
+    sw, _sh = _scaled_slot(slot, _sprite_global_scale(ctx))
+    x0, _y0, x1, _y1 = _play_rect((int(ctx.disp.width), int(ctx.disp.height)))
+
+    left = float(x0 + 2 + (sw / 2.0))
+    right = float(x1 - 1 - (sw / 2.0))
+    if right < left:
+        mid = float((x0 + x1) / 2.0)
+        left = mid
+        right = mid
+    st.x = float(clamp(float(st.x), left, right))
+
+
+def _paste_sprite_clipped(
+    img: Image.Image,
+    sprite: Image.Image,
+    px: int,
+    py: int,
+    clip_rect: Tuple[int, int, int, int],
+) -> None:
+    cx0, cy0, cx1, cy1 = [int(v) for v in clip_rect]
+    ix0 = max(px, cx0)
+    iy0 = max(py, cy0)
+    ix1 = min(px + sprite.width, cx1)
+    iy1 = min(py + sprite.height, cy1)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return
+
+    sx0 = ix0 - px
+    sy0 = iy0 - py
+    sx1 = sx0 + (ix1 - ix0)
+    sy1 = sy0 + (iy1 - iy0)
+    part = sprite.crop((sx0, sy0, sx1, sy1))
+    img.paste(part, (ix0, iy0), part)
+
+
+def _capture_pet_photo(ctx, st: PetState, now: float) -> str:
+    try:
+        w, h = int(ctx.disp.width), int(ctx.disp.height)
+        img = _load_layered_room(ctx, st.room, (w, h)).convert("RGB")
+        sprites = _load_sprites(ctx)
+        sprite = _sprite_for_state(st, sprites, moving=False, now=now)
+        px, py = _sprite_draw_pos(st, sprite)
+        x0, y0, x1, y1 = _play_rect((w, h))
+        _paste_sprite_clipped(img, sprite, px, py, (x0 + 2, y0 + 2, x1 - 1, y1 - 1))
+        fg = _load_room_foreground(ctx, st.room, (w, h))
+        if isinstance(fg, Image.Image):
+            img_rgba = Image.alpha_composite(img.convert("RGBA"), fg)
+            img = img_rgba.convert("RGB")
+
+        d = ImageDraw.Draw(img)
+        stamp = time.strftime("%Y-%m-%d %H:%M")
+        tw = int(d.textlength(stamp, font=ctx.font_s))
+        d.text((w - tw - 5, h - 12), stamp, font=ctx.font_s, fill=(240, 228, 222))
+
+        out_dir = _capture_gallery_dir(ctx)
+        name = f"pet_{int(now)}.png"
+        path = os.path.join(out_dir, name)
+        img.save(path, "PNG")
+        ctx.user["_blank_paths_cache"] = {"t": 0.0, "paths": []}
+        ctx.user["_blank_cards_cache"] = {}
+        return name
+    except Exception:
+        return ""
 
 
 def _brick_layout(w: int, level: int) -> List[Dict]:
     cols = 6
     rows = max(1, min(3, int(level)))
     gap_x = 4
-    gap_y = 4
+    gap_y = 3
     bw = max(16, (w - 28 - ((cols - 1) * gap_x)) // cols)
     bh = 10
     start_x = 14
-    start_y = 72
+    start_y = 30
     bricks: List[Dict] = []
 
     for r in range(rows):
@@ -840,13 +1482,14 @@ def _brick_reset_ball(mg: Dict, w: int, h: int, level: int) -> None:
     x_dir = -1.0 if random.random() < 0.5 else 1.0
     mg["paddle_x"] = float(w // 2)
     mg["ball_x"] = float(w // 2)
-    mg["ball_y"] = float(h - 52)
+    mg["ball_y"] = float(h - 34)
     mg["ball_vx"] = speed * 0.88 * x_dir
     mg["ball_vy"] = -speed
 
 
 def _start_minigame(ctx, st: PetState, name: str, cfg: Dict, now: float) -> None:
     w, h = int(ctx.disp.width), int(ctx.disp.height)
+    _clear_dialogue(st)
     st.play_submode = PLAY_MINIGAME
     st.minigame_name = str(name)
     st.panel_open = False
@@ -879,7 +1522,7 @@ def _start_minigame(ctx, st: PetState, name: str, cfg: Dict, now: float) -> None
         }
     else:  # Runner Dash
         st.minigame_state = {
-            "player_y": float(h - 42),
+            "player_y": float(h - 26),
             "vy": 0.0,
             "on_ground": True,
             "obstacles": [],
@@ -887,21 +1530,19 @@ def _start_minigame(ctx, st: PetState, name: str, cfg: Dict, now: float) -> None
             "elapsed": 0.0,
             "score": 0.0,
         }
-
-    if name == "Brick Breaker":
-        _make_message(st, f"{name} started. Level 1/{BRICK_MAX_LEVELS}.", now, 1.8)
-    else:
-        _make_message(st, f"{name} started. B2 to exit.", now, 1.6)
+    st.arcade_sessions = int(st.arcade_sessions) + 1
+    st.msg = ""
+    st.msg_until = 0.0
 
 
 def _finish_minigame(st: PetState, name: str, win: bool, score: float, now: float) -> None:
     # Reward loop: mood/fun-centric, minor fatigue/hunger cost.
     if win:
         _boost(st, fun=8.0, mood=6.0, energy=-2.5, hunger=-1.8, bladder=-1.2)
-        _make_message(st, f"{name}: win! +fun +mood", now, 2.2)
+        _queue_scene_text(st, f"{name} went great. He had so much fun.", now=now)
     else:
         _boost(st, fun=3.0, mood=1.5, energy=-2.0, hunger=-1.2, bladder=-0.8)
-        _make_message(st, f"{name}: done ({int(score)} pts).", now, 2.0)
+        _queue_scene_text(st, f"{name} wrap-up: {int(score)} points for him.", now=now)
     st.play_submode = PLAY_WORLD
     st.minigame_name = ""
     st.minigame_state = {}
@@ -914,8 +1555,8 @@ def _update_brick_breaker(ctx, st: PetState, dt: float, ev: Dict[str, bool], cfg
         return True, False, 0.0
 
     paddle_w = 42
-    paddle_h = 6
-    paddle_y = h - 20
+    paddle_h = 5
+    paddle_y = h - 14
     paddle_speed = 120.0
     if ctx.inputs.is_down("LEFT"):
         mg["paddle_x"] = float(mg.get("paddle_x", w / 2)) - (paddle_speed * dt)
@@ -939,8 +1580,8 @@ def _update_brick_breaker(ctx, st: PetState, dt: float, ev: Dict[str, bool], cfg
     elif bx > w - 10:
         bx = w - 10
         bvx = -abs(bvx)
-    if by < 64:
-        by = 64
+    if by < 20:
+        by = 20
         bvy = abs(bvy)
 
     px0 = float(mg.get("paddle_x", w / 2)) - (paddle_w / 2)
@@ -989,7 +1630,7 @@ def _update_brick_breaker(ctx, st: PetState, dt: float, ev: Dict[str, bool], cfg
             _brick_reset_ball(mg, w, h, level)
             return False, False, float(mg.get("score", 0.0))
         return True, True, float(mg.get("score", 0.0))
-    if by > (h - 6):
+    if by > (h - 3):
         return True, False, float(mg.get("score", 0.0))
     return False, False, float(mg.get("score", 0.0))
 
@@ -1055,7 +1696,7 @@ def _update_runner_dash(ctx, st: PetState, dt: float, ev: Dict[str, bool], cfg: 
     if not isinstance(mg, dict):
         return True, False, 0.0
 
-    ground_y = h - 42
+    ground_y = h - 26
     player_x = 34
     player_w = 12
     player_h = 16
@@ -1134,10 +1775,7 @@ def _update_minigame(ctx, st: PetState, dt: float, ev: Dict[str, bool], cfg: Dic
         done, win, score = _update_runner_dash(ctx, st, dt, ev, cfg)
 
     if name == "Brick Breaker" and isinstance(st.minigame_state, dict):
-        new_level = int(st.minigame_state.pop("level_up_to", 0) or 0)
-        if new_level > 0:
-            max_levels = int(st.minigame_state.get("max_levels", BRICK_MAX_LEVELS))
-            _make_message(st, f"Brick Breaker Level {new_level}/{max_levels}", now, 1.4)
+        _ = int(st.minigame_state.pop("level_up_to", 0) or 0)
 
     if done:
         _finish_minigame(st, name, win, score, now)
@@ -1165,6 +1803,7 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
 
     if k2_evt == "LONG":
         st.mode = MODE_ONBOARD_1
+        _clear_dialogue(st)
         st.panel_open = False
         st.panel_kind = "ACTIONS"
         st.panel_sel = 0
@@ -1192,7 +1831,7 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
             st.seen_tutorial = True
             st.last_tick = now
             st.play_submode = PLAY_WORLD
-            _make_message(st, "Welcome to PocketR pet life.", now, 1.8)
+            _queue_scene_text(st, "Welcome to Pocket-R pet life.", now=now, speaker="Him")
             _save(ctx, st, force_persist=True)
             return False
         elif k2_evt == "SHORT":
@@ -1207,22 +1846,31 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
         _save(ctx, st)
         return False
 
-    if k2_evt == "SHORT":
+    dialogue = _dialogue_data(ctx)
+    if st.dialogue_active and st.panel_open:
+        st.panel_open = False
+        st.panel_kind = "ACTIONS"
+        st.panel_sel = 0
+        st.play_submode = PLAY_WORLD
+
+    dialogue_confirm_consumed = _update_dialogue_playback(st, sim_dt, now, ev)
+
+    if k2_evt == "SHORT" and not st.dialogue_active:
         if st.panel_open:
             st.panel_open = False
             st.panel_kind = "ACTIONS"
             st.panel_sel = 0
             st.play_submode = PLAY_WORLD
         else:
-            _quick_support(st, now)
+            _quick_support(st, now, dialogue)
 
     # B3 short quick care action (global hold-B3 shutdown still handled by launcher).
-    if b3_evt == "SHORT" and st.alive:
+    if b3_evt == "SHORT" and st.alive and (not st.dialogue_active):
         _quick_care(st, now)
 
     opened_panel_now = False
     # B1 and joystick PRESS both open the actions panel.
-    if (("PRESS" in ev) or ("K1" in ev)) and st.alive and (not st.panel_open) and st.play_submode == PLAY_WORLD:
+    if (not dialogue_confirm_consumed) and (not st.dialogue_active) and (("PRESS" in ev) or ("K1" in ev)) and st.alive and (not st.panel_open) and st.play_submode == PLAY_WORLD:
         st.panel_open = True
         st.panel_kind = "ACTIONS"
         st.panel_sel = 0
@@ -1230,25 +1878,27 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
         opened_panel_now = True
 
     if not st.alive:
-        if "K1" in ev:
+        if (("K1" in ev) or ("PRESS" in ev)) and (not st.dialogue_active):
             keep_age = st.age_seconds
             st = PetState(mode=MODE_PLAY, seen_tutorial=True, age_seconds=keep_age, last_tick=now)
             st.play_submode = PLAY_WORLD
-            _make_message(st, "A new buddy joined you.", now, 2.0)
+            _queue_scene_text(st, "He is back. Take good care of him.", now=now)
             _save(ctx, st, force_persist=True)
             return False
         _save(ctx, st)
         return False
 
     moving = False
-    if not st.panel_open and st.play_submode == PLAY_WORLD:
+    if (not st.dialogue_active) and (not st.panel_open) and st.play_submode == PLAY_WORLD:
         moving = _apply_movement(ctx, st, sim_dt, now)
+    if moving:
+        st.last_move_at = now
+    elif st.last_move_at <= 0.0:
+        st.last_move_at = now
 
     _apply_decay(st, sim_dt, moving=moving, now=now, cfg=cfg)
 
-    dialogue = _dialogue_data(ctx)
-
-    if st.panel_open:
+    if st.panel_open and (not st.dialogue_active):
         items = _panel_items(st, dialogue)
         if items:
             st.panel_sel = int(clamp(float(st.panel_sel), 0.0, float(len(items) - 1)))
@@ -1277,27 +1927,50 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
                 st.panel_kind = "ACTIONS"
                 st.panel_sel = 0
                 st.play_submode = PLAY_WORLD
-                _make_message(st, "Opening Gallery...", now, 1.2)
+                _queue_scene_text(st, "Opening Gallery...", now=now)
                 ctx.user["_app_switch_to"] = 1
                 _save(ctx, st, force_persist=True)
                 return False
+            elif st.panel_kind == "ACTIONS" and chosen == "Take Picture":
+                snap = _capture_pet_photo(ctx, st, now)
+                if snap:
+                    _queue_scene_text(st, f"Saved photo: {snap}", now=now)
+                else:
+                    _queue_scene_text(st, "Photo capture failed.", now=now)
+                st.panel_open = False
+                st.panel_kind = "ACTIONS"
+                st.panel_sel = 0
+                st.play_submode = PLAY_WORLD
             elif st.panel_kind == "ACTIONS" and chosen in ("Brick Breaker", "Memory Match", "Runner Dash"):
                 _start_minigame(ctx, st, chosen, cfg, now)
             elif st.panel_kind == "TALK":
-                msg = _talk_once(st, dialogue, chosen)
-                _make_message(st, msg, now, 3.0)
+                you_line, him_line = _talk_once(st, dialogue, chosen, now)
+                _queue_scene_lines(
+                    st,
+                    [
+                        {"speaker": "You", "text": you_line},
+                        {"speaker": "Him", "text": him_line},
+                    ],
+                    now=now,
+                    cps=DIALOGUE_CPS_DEFAULT,
+                    hold_seconds=DIALOGUE_LINE_HOLD_SECONDS,
+                    pose="talk",
+                    min_pose_seconds=ACTION_POSE_SECONDS,
+                )
                 st.panel_open = False
                 st.panel_kind = "ACTIONS"
                 st.panel_sel = 0
                 st.play_submode = PLAY_WORLD
             else:
                 msg = _run_action(st, chosen, now)
-                _make_message(st, msg, now, 2.4)
+                hold = max(DIALOGUE_LINE_HOLD_SECONDS, max(0.0, float(st.pose_until) - now))
+                _queue_scene_text(st, msg, now=now, hold_seconds=hold)
                 st.panel_open = False
                 st.panel_kind = "ACTIONS"
                 st.panel_sel = 0
                 st.play_submode = PLAY_WORLD
 
+    _clamp_pose_x(ctx, st, now)
     _save(ctx, st)
     return False
 
@@ -1317,27 +1990,7 @@ def _room_base_fallback(size: Tuple[int, int], room: str) -> Image.Image:
         bb = int(8 + (b * (0.40 + 0.60 * (1.0 - t))))
         d.line([0, y, w, y], fill=(rr, gg, bb, 255), width=1)
 
-    d.rounded_rectangle([4, 82, w - 5, h - 5], radius=7, outline=(255, 220, 210, 80), width=2)
-    name = room_info.get("name", room)
-    d.text((8, 90), f"[{name} base placeholder]", fill=(245, 232, 226, 180))
     return base
-
-
-def _object_fallback(size: Tuple[int, int], room_slug: str, fname: str) -> Image.Image:
-    _w, _h = size
-    layer = Image.new("RGBA", size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-
-    cfg = OBJECT_LAYOUT.get(room_slug, {}).get(fname)
-    if cfg:
-        x, y, bw, bh, color = cfg
-    else:
-        x, y, bw, bh, color = (80, 120, 80, 40, (120, 88, 88))
-
-    d.rounded_rectangle([x, y, x + bw, y + bh], radius=6, fill=(color[0], color[1], color[2], 180), outline=(255, 222, 210, 180), width=2)
-    label = fname.replace("obj_", "").replace(".png", "")
-    d.text((x + 6, y + max(4, (bh // 2) - 6)), label, fill=(255, 248, 240, 220))
-    return layer
 
 
 def _load_layered_room(ctx, room: str, size: Tuple[int, int]) -> Image.Image:
@@ -1346,17 +1999,17 @@ def _load_layered_room(ctx, room: str, size: Tuple[int, int]) -> Image.Image:
     slug = str(room_info.get("slug", "hub"))
 
     base_path = ctx.asset("pet_game", "rooms", slug, "base.png")
-    obj_files = ROOM_OBJECTS.get(slug, [])
-    obj_paths = [ctx.asset("pet_game", "rooms", slug, f) for f in obj_files]
+    if not os.path.isfile(base_path):
+        alt_path = ctx.asset("pet_game", "rooms", slug, "Base.png")
+        if os.path.isfile(alt_path):
+            base_path = alt_path
 
-    tags: List[str] = [f"{room}:{w}x{h}"]
-    for p in [base_path] + obj_paths:
-        try:
-            tags.append(f"{p}:{int(os.path.getmtime(p))}")
-        except Exception:
-            tags.append(f"{p}:0")
+    try:
+        base_mtime = int(os.path.getmtime(base_path))
+    except Exception:
+        base_mtime = 0
 
-    key = "|".join(tags)
+    key = f"{room}:base-only:{w}x{h}:{base_path}:{base_mtime}"
     cache = ctx.user.get("_pet_room_cache", {})
     if isinstance(cache, dict) and cache.get("key") == key and isinstance(cache.get("img"), Image.Image):
         return cache["img"].copy()
@@ -1372,21 +2025,49 @@ def _load_layered_room(ctx, room: str, size: Tuple[int, int]) -> Image.Image:
         base = _room_base_fallback((w, h), room)
 
     out = base.copy().convert("RGBA")
-
-    for fname, p in zip(obj_files, obj_paths):
-        if os.path.isfile(p):
-            try:
-                layer = Image.open(p).convert("RGBA")
-                if layer.size != (w, h):
-                    layer = layer.resize((w, h))
-            except Exception:
-                layer = _object_fallback((w, h), slug, fname)
-        else:
-            layer = _object_fallback((w, h), slug, fname)
-        out = Image.alpha_composite(out, layer)
-
     ctx.user["_pet_room_cache"] = {"key": key, "img": out.copy()}
     return out.convert("RGB")
+
+
+def _room_foreground_fallback(size: Tuple[int, int]) -> Image.Image:
+    w, h = size
+    x0, y0, x1, y1 = _play_rect((w, h))
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer, "RGBA")
+
+    # Foreground wall lip so sprite appears to pass behind room border.
+    d.rounded_rectangle([x0, y0, x1, y1], radius=7, outline=(255, 226, 216, 238), width=3)
+    return layer
+
+
+def _load_room_foreground(ctx, room: str, size: Tuple[int, int]) -> Image.Image:
+    w, h = size
+    room_info = ROOMS.get(room, ROOMS[ROOM_HUB])
+    slug = str(room_info.get("slug", "hub"))
+    fg_path = ctx.asset("pet_game", "rooms", slug, "fg.png")
+
+    try:
+        fg_mtime = int(os.path.getmtime(fg_path))
+    except Exception:
+        fg_mtime = 0
+
+    key = f"{room}:fg:{w}x{h}:{fg_mtime}"
+    cache = ctx.user.get("_pet_room_fg_cache", {})
+    if isinstance(cache, dict) and cache.get("key") == key and isinstance(cache.get("img"), Image.Image):
+        return cache["img"].copy()
+
+    if os.path.isfile(fg_path):
+        try:
+            fg = Image.open(fg_path).convert("RGBA")
+            if fg.size != (w, h):
+                fg = fg.resize((w, h))
+        except Exception:
+            fg = _room_foreground_fallback((w, h))
+    else:
+        fg = _room_foreground_fallback((w, h))
+
+    ctx.user["_pet_room_fg_cache"] = {"key": key, "img": fg.copy()}
+    return fg
 
 
 def _load_intro_slide(ctx, filename: str, fallback_title: str, size: Tuple[int, int]) -> Image.Image:
@@ -1491,53 +2172,416 @@ def _mood_word(st: PetState) -> str:
     return "Sad"
 
 
+def _short_room(room: str) -> str:
+    mapping = {
+        ROOM_HUB: "Hall",
+        ROOM_BED: "Bed",
+        ROOM_LIVING: "Liv",
+        ROOM_BATH: "Bath",
+        ROOM_ARCADE: "Arc",
+    }
+    return mapping.get(str(room), str(room).title())
+
+
+def _draw_room_minimap(d: ImageDraw.ImageDraw, x: int, y: int, st: PetState) -> None:
+    node = 4
+    gap = 4
+
+    def _p(gx: int, gy: int) -> Tuple[int, int]:
+        return (x + gx * (node + gap), y + gy * (node + gap))
+
+    grid = {
+        ROOM_BATH: (1, 0),
+        ROOM_ARCADE: (0, 1),
+        ROOM_HUB: (1, 1),
+        ROOM_BED: (2, 1),
+        ROOM_LIVING: (1, 2),
+    }
+
+    links = [
+        (ROOM_HUB, ROOM_BATH),
+        (ROOM_HUB, ROOM_ARCADE),
+        (ROOM_HUB, ROOM_BED),
+        (ROOM_HUB, ROOM_LIVING),
+    ]
+    for a, b in links:
+        ax, ay = _p(*grid[a])
+        bx, by = _p(*grid[b])
+        d.line(
+            [
+                ax + node // 2,
+                ay + node // 2,
+                bx + node // 2,
+                by + node // 2,
+            ],
+            fill=(228, 206, 198, 160),
+            width=1,
+        )
+
+    for room, (gx, gy) in grid.items():
+        nx, ny = _p(gx, gy)
+        active = (room == st.room)
+        fill = (255, 236, 224, 240) if active else (84, 68, 74, 220)
+        out = (255, 220, 210, 220) if active else (200, 176, 168, 160)
+        d.rounded_rectangle([nx, ny, nx + node, ny + node], radius=1, fill=fill, outline=out, width=1)
+
+
+def _draw_vertical_edge_text(
+    img: Image.Image,
+    text: str,
+    left: bool,
+    y: int,
+    font,
+    fill: Tuple[int, int, int, int],
+    x_left: int,
+    x_right: int,
+) -> None:
+    if not text:
+        return
+    tmp = Image.new("RGBA", (100, 14), (0, 0, 0, 0))
+    td = ImageDraw.Draw(tmp)
+    td.text((0, 0), text, font=font, fill=fill)
+    bb = tmp.getbbox()
+    if not bb:
+        return
+    core = tmp.crop(bb)
+    rot = core.rotate(90 if left else 270, expand=True)
+    x = x_left if left else max(x_left, x_right - rot.width)
+    img.paste(rot, (x, y), rot)
+
+
+def _draw_edge_room_hints(ctx, img: Image.Image, st: PetState) -> None:
+    if st.panel_open:
+        return
+
+    room_info = ROOMS.get(st.room, ROOMS[ROOM_HUB])
+    neigh = room_info.get("neighbors", {})
+    d = ImageDraw.Draw(img, "RGBA")
+    w, h = img.size
+    sf = ctx.font_s
+    play_l, play_top, play_r, play_bot = _play_rect((w, h))
+
+    up = neigh.get("UP")
+    if up:
+        top = "^ " + _short_room(str(up))
+        tw = int(d.textlength(top, font=sf))
+        up_y = max(42, play_top - 12)
+        d.text(((w - tw) // 2, up_y), top, font=sf, fill=(238, 220, 214, 186))
+
+    down = neigh.get("DOWN")
+    if down:
+        bottom = "v " + _short_room(str(down))
+        tw = int(d.textlength(bottom, font=sf))
+        d.text(((w - tw) // 2, play_bot - 11), bottom, font=sf, fill=(238, 220, 214, 176))
+
+    side_y = max(play_top + 18, ((play_top + play_bot) // 2) - 14)
+
+    left = neigh.get("LEFT")
+    if left:
+        _draw_vertical_edge_text(
+            img,
+            _short_room(str(left)),
+            left=True,
+            y=side_y,
+            font=sf,
+            fill=(238, 220, 214, 164),
+            x_left=play_l + 2,
+            x_right=play_r - 2,
+        )
+
+    right = neigh.get("RIGHT")
+    if right:
+        _draw_vertical_edge_text(
+            img,
+            _short_room(str(right)),
+            left=False,
+            y=side_y,
+            font=sf,
+            fill=(238, 220, 214, 164),
+            x_left=play_l + 2,
+            x_right=play_r - 2,
+        )
+
+
+def _draw_blocked_edge_flash(img: Image.Image, st: PetState, now: float) -> None:
+    until = float(st.edge_flash_until or 0.0)
+    if now >= until:
+        st.edge_flash_side = "NONE"
+        return
+
+    remain = max(0.0, until - now)
+    frac = clamp(remain / BLOCK_FLASH_SECONDS, 0.0, 1.0)
+    alpha = int(220 * frac)
+    if alpha <= 0:
+        return
+
+    x0, y0, x1, y1 = _play_rect(img.size)
+    side = str(st.edge_flash_side or "NONE").upper()
+    d = ImageDraw.Draw(img, "RGBA")
+    color = (255, 82, 82, alpha)
+    glow = (255, 82, 82, int(alpha * 0.45))
+
+    if side == "LEFT":
+        d.rectangle([x0 - 1, y0 + 2, x0 + 3, y1 - 2], fill=glow)
+        d.line([x0 + 1, y0 + 2, x0 + 1, y1 - 2], fill=color, width=2)
+    elif side == "RIGHT":
+        d.rectangle([x1 - 3, y0 + 2, x1 + 1, y1 - 2], fill=glow)
+        d.line([x1 - 1, y0 + 2, x1 - 1, y1 - 2], fill=color, width=2)
+    elif side == "UP":
+        d.rectangle([x0 + 2, y0 - 1, x1 - 2, y0 + 3], fill=glow)
+        d.line([x0 + 2, y0 + 1, x1 - 2, y0 + 1], fill=color, width=2)
+    elif side == "DOWN":
+        d.rectangle([x0 + 2, y1 - 3, x1 - 2, y1 + 1], fill=glow)
+        d.line([x0 + 2, y1 - 1, x1 - 2, y1 - 1], fill=color, width=2)
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    total = (dt.year * 12) + (dt.month - 1) + int(months)
+    y = total // 12
+    m = (total % 12) + 1
+    day = min(dt.day, 28)
+    return dt.replace(year=y, month=m, day=day)
+
+
+def _together_start(now_dt: datetime) -> datetime:
+    start = datetime(now_dt.year, 11, 2, 0, 0, 0)
+    if now_dt < start:
+        start = datetime(now_dt.year - 1, 11, 2, 0, 0, 0)
+    return start
+
+
+def _format_together_elapsed(now_dt: datetime) -> str:
+    start = _together_start(now_dt)
+    years = 0
+    while _add_months(start, (years + 1) * 12) <= now_dt:
+        years += 1
+    anchor = _add_months(start, years * 12)
+    months = 0
+    while _add_months(anchor, 1) <= now_dt:
+        months += 1
+        anchor = _add_months(anchor, 1)
+
+    rem = now_dt - anchor
+    days = int(rem.days)
+    hours = int(rem.seconds // 3600)
+    mins = int((rem.seconds % 3600) // 60)
+    return f"{years}Y {months}M {days}D {hours:02d}H {mins:02d}M"
+
+
+def _birthday_countdown(now_dt: datetime, month: int, day: int) -> str:
+    target = datetime(now_dt.year, month, day, 0, 0, 0)
+    if target <= now_dt:
+        target = datetime(now_dt.year + 1, month, day, 0, 0, 0)
+    delta = target - now_dt
+    d = int(delta.days)
+    h = int(delta.seconds // 3600)
+    return f"{d}D {h:02d}H"
+
+
+def _draw_hub_couple_stats(ctx, img: Image.Image, st: PetState, now: float) -> None:
+    if st.room != ROOM_HUB or st.panel_open:
+        return
+    d = ImageDraw.Draw(img, "RGBA")
+    w, h = img.size
+    play_l, _play_t, play_r, play_b = _play_rect((w, h))
+
+    now_dt = datetime.fromtimestamp(now)
+    together = _format_together_elapsed(now_dt)
+    rahil_bday = _birthday_countdown(now_dt, 3, 1)
+    dianna_bday = _birthday_countdown(now_dt, 7, 31)
+    hugs = int(st.hugs_given)
+    cuddles = int(st.cuddles_shared)
+    chats = int(st.talk_sessions)
+    dates = int(st.arcade_sessions)
+
+    lines = [
+        f"T {together} | R {rahil_bday} | D {dianna_bday}",
+        f"H{hugs} C{cuddles} T{chats} A{dates}",
+    ]
+    max_w = max(10, (play_r - play_l) - 8)
+
+    def _fit(line: str) -> str:
+        txt = str(line)
+        while txt and d.textlength(txt, font=ctx.font_s) > max_w:
+            txt = txt[:-1]
+        return txt
+
+    y = play_b - 22
+    for line in lines:
+        line = _fit(line)
+        d.text((play_l + 1, y), line, font=ctx.font_s, fill=(8, 6, 8, 85))
+        d.text((play_l, y), line, font=ctx.font_s, fill=(244, 232, 226, 108))
+        y += 10
+
+
 def _draw_top_info(ctx, img: Image.Image, st: PetState) -> None:
     d = ImageDraw.Draw(img, "RGBA")
     w, _h = img.size
     mf = _meta_font(ctx)
+    _draw_room_minimap(d, 10, 40, st)
 
     room_name = str(ROOMS.get(st.room, ROOMS[ROOM_HUB]).get("name", st.room))
-    d.text((10, 40), room_name, font=mf, fill=(245, 234, 228, 230))
-
+    room_x = 35
+    info_y = 44
     age_text = _format_age(st.age_seconds)
-    tw = int(d.textlength(age_text, font=mf))
-    d.text((w - 10 - tw, 40), age_text, font=mf, fill=(232, 210, 202, 228))
+    age_tw = int(d.textlength(age_text, font=mf))
+    age_x = w - 10 - age_tw
+    max_room_w = max(20, age_x - room_x - 8)
+    while room_name and d.textlength(room_name, font=mf) > max_room_w:
+        room_name = room_name[:-1]
+    if not room_name:
+        room_name = str(st.room)
+    d.text((room_x, info_y), room_name, font=mf, fill=(245, 234, 228, 228))
 
-    mood = _mood_word(st)
-    bb = d.textbbox((0, 0), mood, font=mf)
-    m_tw = int(bb[2] - bb[0])
-    m_th = int(bb[3] - bb[1])
-    pad_x = 9
-    pad_y = 3
-    bw = m_tw + (pad_x * 2)
-    bh = m_th + (pad_y * 2)
-    bx = (w - bw) // 2
-    by = 37
-    d.rounded_rectangle([bx, by, bx + bw, by + bh], radius=3, fill=(20, 14, 16, 170), outline=(255, 220, 210, 130), width=1)
-    tx = bx + pad_x - bb[0]
-    ty = by + pad_y - bb[1]
-    d.text((tx, ty), mood, font=mf, fill=(248, 238, 232, 235))
+    d.text((age_x, info_y), age_text, font=mf, fill=(232, 210, 202, 224))
+
+    # Mood word intentionally removed from top line to keep header uncluttered.
 
 
-def _sprite_for_state(st: PetState, sprites: Dict[str, Image.Image], moving: bool, now: float) -> Image.Image:
-    if st.pose == "sleep" and now < st.pose_until:
-        return sprites.get("sleep", sprites.get("idle"))
-    if st.pose == "shower" and now < st.pose_until:
-        return sprites.get("shower", sprites.get("idle"))
-    if st.pose == "toilet" and now < st.pose_until:
-        return sprites.get("toilet", sprites.get("idle"))
+def _sprite_for_state(st: PetState, sprites: Dict[str, object], moving: bool, now: float) -> Image.Image:
+    idle = sprites.get("idle")
+    if not isinstance(idle, Image.Image):
+        idle = _placeholder_sprite(46, "idle")
+
+    def _pick(frames_obj, idx: int) -> Optional[Image.Image]:
+        if not isinstance(frames_obj, list) or not frames_obj:
+            return None
+        frame = frames_obj[idx % len(frames_obj)]
+        return frame if isinstance(frame, Image.Image) else None
+
+    def _pick_dir(base: str, idx: int) -> Optional[Image.Image]:
+        side = "l" if int(st.facing) < 0 else "r"
+        fr = _pick(sprites.get(f"{base}_{side}"), idx)
+        if fr is not None:
+            return fr
+        return _pick(sprites.get(base), idx)
 
     if moving:
-        frame = int(st.walk_phase) % 2
-        if frame == 0:
-            return sprites.get("walk1", sprites.get("idle"))
-        return sprites.get("walk2", sprites.get("idle"))
-    return sprites.get("idle")
+        st.sad_idle_t0 = 0.0
+        key = "walk_anim_l" if int(st.facing) < 0 else "walk_anim_r"
+        idx = int(st.walk_phase * (float(ANIM_FPS.get("walk", 5.8)) / 8.0))
+        fr = _pick(sprites.get(key), idx)
+        if fr is not None:
+            return fr
+        w1 = sprites.get("walk1")
+        w2 = sprites.get("walk2")
+        if int(st.walk_phase) % 2 == 0 and isinstance(w1, Image.Image):
+            return w1
+        if isinstance(w2, Image.Image):
+            return w2
+        return idle
+
+    pose_deadline = now < float(st.pose_until)
+    if st.pose == "sleep" and now < st.pose_until:
+        fr = _pick_dir("sleeping_anim", int(now * float(ANIM_FPS.get("sleeping", 4.0))))
+        if fr is not None:
+            return fr
+        sleep = sprites.get("sleep")
+        return sleep if isinstance(sleep, Image.Image) else idle
+
+    if st.pose == "shower" and now < st.pose_until:
+        fr = _pick_dir("shower_anim", int(now * float(ANIM_FPS.get("shower", 5.0))))
+        if fr is not None:
+            return fr
+        sh = sprites.get("shower")
+        return sh if isinstance(sh, Image.Image) else idle
+
+    if st.pose == "changing" and now < st.pose_until:
+        fr = _pick_dir("changing_anim", int(now * float(ANIM_FPS.get("changing", 4.9))))
+        if fr is not None:
+            return fr
+        return idle
+
+    if st.pose == "hugcuddle" and pose_deadline:
+        fr = _pick_dir("hugcuddle_anim", int(now * float(ANIM_FPS.get("hugcuddle", 4.8))))
+        if fr is not None:
+            return fr
+        return _pick_dir("talking_anim", int(now * float(ANIM_FPS.get("talking", 5.7)))) or idle
+
+    if st.pose == "talk" and now < st.pose_until:
+        fr = _pick_dir("talking_anim", int(now * float(ANIM_FPS.get("talking", 5.7))))
+        if fr is not None:
+            return fr
+        return idle
+
+    if st.pose == "toilet" and now < st.pose_until:
+        tl = sprites.get("toilet")
+        if isinstance(tl, Image.Image):
+            if int(st.facing) < 0:
+                return ImageOps.mirror(tl)
+            return tl
+        return idle
+
+    idle_for = 0.0
+    if st.last_move_at > 0.0:
+        idle_for = max(0.0, now - float(st.last_move_at))
+
+    low_stats = (
+        st.health < 55.0
+        or st.mood < 55.0
+        or st.hunger < 45.0
+        or st.energy < 45.0
+        or st.hygiene < 45.0
+        or st.social < 40.0
+        or st.fun < 40.0
+        or st.bladder < 45.0
+    )
+
+    if st.room == ROOM_ARCADE:
+        fr = _pick_dir("gaming_anim", int(now * float(ANIM_FPS.get("gaming", 5.1))))
+        if fr is not None:
+            return fr
+
+    if low_stats:
+        sad_key = "idle_sad_anim_l" if int(st.facing) < 0 else "idle_sad_anim_r"
+        sad_frames = sprites.get(sad_key)
+        if not isinstance(sad_frames, list):
+            sad_frames = sprites.get("idle_sad_anim")
+        if isinstance(sad_frames, list) and sad_frames:
+            if st.sad_idle_t0 <= 0.0:
+                st.sad_idle_t0 = now
+            elapsed = max(0.0, now - float(st.sad_idle_t0))
+            fps = float(ANIM_FPS.get("idle_sad", 4.7))
+            n = len(sad_frames)
+            intro_seconds = float(n) / fps
+            if n <= 5:
+                idx = int(elapsed * fps) % n
+            elif elapsed < intro_seconds:
+                idx = min(n - 1, int(elapsed * fps))
+            else:
+                loop_span = max(1, n - 5)
+                idx = 5 + (int((elapsed - intro_seconds) * fps) % loop_span)
+            fr = _pick(sad_frames, idx)
+            if fr is not None:
+                return fr
+    else:
+        st.sad_idle_t0 = 0.0
+
+    if idle_for >= IDLE_SIT_SECONDS:
+        fr = _pick_dir("idle_sit_anim", int(now * float(ANIM_FPS.get("idle_sit", 4.2))))
+        if fr is not None:
+            return fr
+
+    fr = _pick_dir("idle_happy_anim", int(now * float(ANIM_FPS.get("idle_happy", 4.9))))
+    if fr is not None:
+        return fr
+
+    if low_stats:
+        fr = _pick_dir("idle_sad_anim", int(now * float(ANIM_FPS.get("idle_sad", 4.7))))
+        if fr is not None:
+            return fr
+
+    if int(st.facing) < 0:
+        return ImageOps.mirror(idle)
+    return idle
 
 
 def _draw_action_panel(ctx, img: Image.Image, st: PetState, dialogue: Dict[str, List[Dict]]) -> Image.Image:
     w, h = img.size
-    rect = (8, h - 94, w - 9, h - 8)
+    play_l, play_t, play_r, play_b = _play_rect((w, h))
+    panel_h = 84
+    panel_y0 = max(play_t + 20, play_b - panel_h)
+    rect = (play_l + 2, panel_y0, play_r - 2, play_b - 2)
     img = overlay_panel(img, rect, radius=6, fill=(8, 6, 10, 168), outline=(255, 220, 210, 105), width=1)
     d = ImageDraw.Draw(img)
     of = _overlay_font(ctx)
@@ -1583,7 +2627,7 @@ def _draw_top_center_text(ctx, img: Image.Image, text: str) -> None:
     of = _overlay_font(ctx)
     w, _h = img.size
     lines = wrap_text(d, text, of, max_width=w - 24)[:2]
-    y = 58
+    y = 62
 
     for line in lines:
         tw = int(d.textlength(line, font=of))
@@ -1593,22 +2637,37 @@ def _draw_top_center_text(ctx, img: Image.Image, text: str) -> None:
         y += 15
 
 
+def _dialogue_scene_text(st: PetState) -> str:
+    if not st.dialogue_active:
+        return ""
+    if st.dialogue_line_idx < 0 or st.dialogue_line_idx >= len(st.dialogue_queue):
+        return ""
+    line = _dialogue_line_text(st.dialogue_queue[st.dialogue_line_idx])
+    if not line:
+        return ""
+    chars = int(clamp(float(st.dialogue_char_idx), 0.0, float(len(line))))
+    out = line[:chars]
+    if chars < len(line):
+        out += "▌"
+    return out
+
+
 def _draw_minigame_overlay(ctx, img: Image.Image, st: PetState) -> Image.Image:
     name = str(st.minigame_name or "")
     if not name:
         return img
 
     w, h = img.size
-    rect = (8, 62, w - 9, h - 8)
-    img = overlay_panel(img, rect, radius=8, fill=(0, 0, 0, 255), outline=(255, 220, 210, 110), width=2)
+    rect = (2, 2, w - 3, h - 3)
+    img = overlay_panel(img, rect, radius=6, fill=(0, 0, 0, 255), outline=(255, 220, 210, 95), width=1)
     d = ImageDraw.Draw(img)
     x0, y0, x1, y1 = rect
-    d.text((x0 + 10, y0 + 8), name, font=ctx.font_m, fill=(250, 238, 232))
-    d.text((x1 - 10 - int(d.textlength("B2 exit", font=ctx.font_s)), y0 + 12), "B2 exit", font=ctx.font_s, fill=(222, 208, 200))
+    d.text((x0 + 8, y0 + 4), name, font=ctx.font_s, fill=(250, 238, 232))
+    d.text((x1 - 8 - int(d.textlength("B2 exit", font=ctx.font_s)), y0 + 4), "B2 exit", font=ctx.font_s, fill=(222, 208, 200))
 
     mg = st.minigame_state if isinstance(st.minigame_state, dict) else {}
-    cx0, cy0 = x0 + 8, y0 + 30
-    cx1, cy1 = x1 - 8, y1 - 8
+    cx0, cy0 = x0 + 4, y0 + 16
+    cx1, cy1 = x1 - 4, y1 - 6
 
     if name == "Brick Breaker":
         for b in list(mg.get("bricks", [])):
@@ -1623,17 +2682,17 @@ def _draw_minigame_overlay(ctx, img: Image.Image, st: PetState) -> Image.Image:
             d.rounded_rectangle([bx0, by0, bx0 + bw, by0 + bh], radius=2, fill=fill, outline=(255, 234, 214), width=1)
 
         paddle_x = int(mg.get("paddle_x", w // 2))
-        paddle_y = h - 20
+        paddle_y = h - 14
         d.rounded_rectangle([paddle_x - 21, paddle_y, paddle_x + 21, paddle_y + 6], radius=2, fill=(238, 226, 220))
         ball_x = int(mg.get("ball_x", w // 2))
         ball_y = int(mg.get("ball_y", h // 2))
         d.ellipse([ball_x - 3, ball_y - 3, ball_x + 3, ball_y + 3], fill=(255, 240, 232))
         score = int(mg.get("score", 0))
-        d.text((cx0, cy1 - 13), f"Score {score}", font=ctx.font_s, fill=(238, 228, 220))
+        d.text((cx0, cy1 - 12), f"Score {score}", font=ctx.font_s, fill=(238, 228, 220))
         level = int(mg.get("level", 1))
         max_levels = int(mg.get("max_levels", BRICK_MAX_LEVELS))
         lvl = f"L{level}/{max_levels}"
-        d.text((cx1 - 8 - int(d.textlength(lvl, font=ctx.font_s)), cy1 - 13), lvl, font=ctx.font_s, fill=(238, 228, 220))
+        d.text((cx1 - int(d.textlength(lvl, font=ctx.font_s)), cy1 - 12), lvl, font=ctx.font_s, fill=(238, 228, 220))
 
     elif name == "Memory Match":
         cards = list(mg.get("cards", []))
@@ -1657,10 +2716,10 @@ def _draw_minigame_overlay(ctx, img: Image.Image, st: PetState) -> Image.Image:
             label = str(cards[i]) if is_open else "?"
             lw = int(d.textlength(label, font=ctx.font_m))
             d.text((bx + (cw - lw) // 2, by + (ch // 2) - 8), label, font=ctx.font_m, fill=fg)
-        d.text((cx0, cy1 - 13), f"Moves {int(mg.get('moves', 0))}", font=ctx.font_s, fill=(238, 228, 220))
+        d.text((cx0, cy1 - 12), f"Moves {int(mg.get('moves', 0))}", font=ctx.font_s, fill=(238, 228, 220))
 
     else:  # Runner Dash
-        ground = h - 42
+        ground = h - 26
         d.line([cx0, ground, cx1, ground], fill=(236, 224, 216), width=2)
         player_y = int(mg.get("player_y", ground))
         d.rounded_rectangle([34, player_y - 16, 46, player_y], radius=2, fill=(255, 214, 184), outline=(255, 242, 234), width=1)
@@ -1670,8 +2729,43 @@ def _draw_minigame_overlay(ctx, img: Image.Image, st: PetState) -> Image.Image:
             oh = int(o.get("h", 14))
             d.rounded_rectangle([ox, ground - oh, ox + ow, ground], radius=2, fill=(232, 120, 120), outline=(255, 220, 220), width=1)
         score = int(mg.get("score", 0))
-        d.text((cx0, cy1 - 13), f"Score {score}", font=ctx.font_s, fill=(238, 228, 220))
+        d.text((cx0, cy1 - 12), f"Score {score}", font=ctx.font_s, fill=(238, 228, 220))
 
+    return img
+
+
+def _draw_game_over(ctx, st: PetState, size: Tuple[int, int]) -> Image.Image:
+    w, h = int(size[0]), int(size[1])
+    img = Image.new("RGB", (w, h), (36, 0, 0))
+    d = ImageDraw.Draw(img)
+    for y in range(h):
+        t = y / float(max(1, h - 1))
+        r = int(86 + (64 * t))
+        g = int(4 + (8 * t))
+        b = int(4 + (8 * t))
+        d.line([0, y, w, y], fill=(r, g, b), width=1)
+
+    d.rounded_rectangle([10, 22, w - 11, h - 24], radius=8, fill=(16, 0, 0), outline=(255, 180, 180), width=2)
+
+    title = "GAME OVER"
+    msg = "You did not take care of him."
+    hint = "B1 / PRESS to restart"
+    reason = ""
+    if st.death_reason:
+        reason = f"Cause: low {str(st.death_reason)}"
+
+    tw = int(d.textlength(title, font=ctx.font_l))
+    d.text(((w - tw) // 2, 38), title, font=ctx.font_l, fill=(255, 232, 232))
+
+    mw = int(d.textlength(msg, font=ctx.font_s))
+    d.text(((w - mw) // 2, 76), msg, font=ctx.font_s, fill=(255, 214, 214))
+
+    if reason:
+        rw = int(d.textlength(reason, font=ctx.font_s))
+        d.text(((w - rw) // 2, 96), reason, font=ctx.font_s, fill=(245, 190, 190))
+
+    hw = int(d.textlength(hint, font=ctx.font_s))
+    d.text(((w - hw) // 2, h - 48), hint, font=ctx.font_s, fill=(255, 236, 236))
     return img
 
 
@@ -1699,16 +2793,16 @@ def render(ctx) -> Image.Image:
     if st.play_submode == PLAY_MINIGAME:
         img = Image.new("RGB", (w, h), (0, 0, 0))
         img = _draw_minigame_overlay(ctx, img, st)
-        if st.msg:
-            _draw_top_center_text(ctx, img, st.msg)
         return img
+
+    if not st.alive:
+        return _draw_game_over(ctx, st, (w, h))
 
     img = _load_layered_room(ctx, st.room, (w, h)).convert("RGB")
     _draw_stats(ctx, img, st)
     _draw_top_info(ctx, img, st)
 
-    sprite_px = max(34, min(60, w // 4))
-    sprites = _load_sprites(ctx, sprite_px)
+    sprites = _load_sprites(ctx)
 
     moving = False
     if st.alive and not st.panel_open and now >= st.pose_until:
@@ -1725,9 +2819,16 @@ def render(ctx) -> Image.Image:
         tint = Image.new("RGBA", sprite.size, (40, 40, 40, 170))
         sprite = Image.alpha_composite(sprite, tint)
 
-    px = int(st.x - (sprite.width // 2))
-    py = int(st.y - (sprite.height // 2))
-    img.paste(sprite, (px, py), sprite)
+    px, py = _sprite_draw_pos(st, sprite)
+    x0, y0, x1, y1 = _play_rect((w, h))
+    _paste_sprite_clipped(img, sprite, px, py, (x0 + 2, y0 + 2, x1 - 1, y1 - 1))
+
+    fg = _load_room_foreground(ctx, st.room, (w, h))
+    if isinstance(fg, Image.Image):
+        img_rgba = Image.alpha_composite(img.convert("RGBA"), fg)
+        img = img_rgba.convert("RGB")
+
+    _draw_blocked_edge_flash(img, st, now)
 
     if st.pose == "toilet" and now < st.blur_until:
         img = img.filter(ImageFilter.GaussianBlur(2.2))
@@ -1736,10 +2837,12 @@ def render(ctx) -> Image.Image:
         tw = int(d.textlength(text, font=ctx.font_l))
         d.text(((w - tw) // 2, (h // 2) - 10), text, font=ctx.font_l, fill=(255, 245, 238))
 
-    if st.msg:
+    if st.dialogue_active:
+        _draw_top_center_text(ctx, img, _dialogue_scene_text(st))
+    elif st.msg:
         _draw_top_center_text(ctx, img, st.msg)
 
-    if st.panel_open:
+    if st.panel_open and (not st.dialogue_active):
         img = _draw_action_panel(ctx, img, st, _dialogue_data(ctx))
 
     return img

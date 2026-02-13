@@ -77,6 +77,8 @@ def _defaults(ctx) -> Dict:
 def _pet_defaults() -> Dict:
     return {
         "sim_speed": 1.0,
+        "sprite_global_scale": 1.0,
+        "sprite_size_preset": "small",
         "difficulty_profile": "normal",
         "decay_hunger_mult": 1.0,
         "decay_energy_mult": 1.0,
@@ -123,6 +125,18 @@ def _coerce_profile(v) -> str:
     if s in ("easy", "normal", "hard", "custom"):
         return s
     return "normal"
+
+
+def _coerce_sprite_size_preset(v) -> str:
+    s = str(v or "small").strip().lower()
+    return "medium" if s == "medium" else "small"
+
+
+def _coerce_sprite_global_scale(v) -> float:
+    try:
+        return round(clamp(float(v), 0.85, 1.20), 2)
+    except Exception:
+        return 1.0
 
 
 def _coerce_mult(v: float, lo: float = 0.5, hi: float = 2.0, d: int = 2) -> float:
@@ -185,6 +199,12 @@ def _ensure_prefs(ctx) -> Dict:
                 base_pg[k] = raw_pg[k]
 
     base_pg["sim_speed"] = _coerce_mult(base_pg.get("sim_speed", 1.0), 0.5, 2.0, 2)
+    base_pg["sprite_size_preset"] = _coerce_sprite_size_preset(base_pg.get("sprite_size_preset", "small"))
+    if "sprite_global_scale" in raw_pg:
+        base_pg["sprite_global_scale"] = _coerce_sprite_global_scale(raw_pg.get("sprite_global_scale", 1.0))
+    else:
+        # One-time migration path from old size preset.
+        base_pg["sprite_global_scale"] = 1.10 if base_pg["sprite_size_preset"] == "medium" else 1.0
     base_pg["difficulty_profile"] = _coerce_profile(base_pg.get("difficulty_profile", "normal"))
 
     for k in (
@@ -380,6 +400,7 @@ def _pet_items(prefs: Dict) -> List[Tuple[str, str]]:
     pg = prefs.get("pet_game", {}) if isinstance(prefs.get("pet_game"), dict) else _pet_defaults()
     return [
         ("Sim Speed", f"{float(pg.get('sim_speed', 1.0)):.2f}"),
+        ("Sprite Scale", f"{float(pg.get('sprite_global_scale', 1.0)):.2f}"),
         ("Difficulty", str(pg.get("difficulty_profile", "normal")).title()),
         ("Decay Hunger", f"{float(pg.get('decay_hunger_mult', 1.0)):.2f}"),
         ("Decay Energy", f"{float(pg.get('decay_energy_mult', 1.0)):.2f}"),
@@ -530,70 +551,77 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
                 pg["sim_speed"] = _coerce_mult(float(pg.get("sim_speed", 1.0)) - 0.05, 0.5, 2.0, 2)
             if "RIGHT" in ev:
                 pg["sim_speed"] = _coerce_mult(float(pg.get("sim_speed", 1.0)) + 0.05, 0.5, 2.0, 2)
-        elif sel == 1 and ("LEFT" in ev or "RIGHT" in ev or confirm):
+        elif sel == 1:
+            cur = _coerce_sprite_global_scale(pg.get("sprite_global_scale", 1.0))
+            if "LEFT" in ev:
+                cur = _coerce_sprite_global_scale(cur - 0.05)
+            if "RIGHT" in ev:
+                cur = _coerce_sprite_global_scale(cur + 0.05)
+            pg["sprite_global_scale"] = cur
+        elif sel == 2 and ("LEFT" in ev or "RIGHT" in ev or confirm):
             order = ["easy", "normal", "hard", "custom"]
             cur = _coerce_profile(pg.get("difficulty_profile", "normal"))
             idx = order.index(cur)
             idx = (idx - 1) % len(order) if "LEFT" in ev else (idx + 1) % len(order)
             pg["difficulty_profile"] = order[idx]
-        elif sel == 2:
+        elif sel == 3:
             if "LEFT" in ev:
                 pg["decay_hunger_mult"] = _coerce_mult(float(pg.get("decay_hunger_mult", 1.0)) - mult_delta)
             if "RIGHT" in ev:
                 pg["decay_hunger_mult"] = _coerce_mult(float(pg.get("decay_hunger_mult", 1.0)) + mult_delta)
-        elif sel == 3:
+        elif sel == 4:
             if "LEFT" in ev:
                 pg["decay_energy_mult"] = _coerce_mult(float(pg.get("decay_energy_mult", 1.0)) - mult_delta)
             if "RIGHT" in ev:
                 pg["decay_energy_mult"] = _coerce_mult(float(pg.get("decay_energy_mult", 1.0)) + mult_delta)
-        elif sel == 4:
+        elif sel == 5:
             if "LEFT" in ev:
                 pg["decay_hygiene_mult"] = _coerce_mult(float(pg.get("decay_hygiene_mult", 1.0)) - mult_delta)
             if "RIGHT" in ev:
                 pg["decay_hygiene_mult"] = _coerce_mult(float(pg.get("decay_hygiene_mult", 1.0)) + mult_delta)
-        elif sel == 5:
+        elif sel == 6:
             if "LEFT" in ev:
                 pg["decay_social_mult"] = _coerce_mult(float(pg.get("decay_social_mult", 1.0)) - mult_delta)
             if "RIGHT" in ev:
                 pg["decay_social_mult"] = _coerce_mult(float(pg.get("decay_social_mult", 1.0)) + mult_delta)
-        elif sel == 6:
+        elif sel == 7:
             if "LEFT" in ev:
                 pg["decay_fun_mult"] = _coerce_mult(float(pg.get("decay_fun_mult", 1.0)) - mult_delta)
             if "RIGHT" in ev:
                 pg["decay_fun_mult"] = _coerce_mult(float(pg.get("decay_fun_mult", 1.0)) + mult_delta)
-        elif sel == 7:
+        elif sel == 8:
             if "LEFT" in ev:
                 pg["decay_bladder_mult"] = _coerce_mult(float(pg.get("decay_bladder_mult", 1.0)) - mult_delta)
             if "RIGHT" in ev:
                 pg["decay_bladder_mult"] = _coerce_mult(float(pg.get("decay_bladder_mult", 1.0)) + mult_delta)
-        elif sel == 8:
+        elif sel == 9:
             if "LEFT" in ev:
                 pg["hp_loss_mult"] = _coerce_mult(float(pg.get("hp_loss_mult", 1.0)) - mult_delta)
             if "RIGHT" in ev:
                 pg["hp_loss_mult"] = _coerce_mult(float(pg.get("hp_loss_mult", 1.0)) + mult_delta)
-        elif sel == 9:
+        elif sel == 10:
             if "LEFT" in ev:
                 pg["hp_regen_mult"] = _coerce_mult(float(pg.get("hp_regen_mult", 1.0)) - mult_delta)
             if "RIGHT" in ev:
                 pg["hp_regen_mult"] = _coerce_mult(float(pg.get("hp_regen_mult", 1.0)) + mult_delta)
-        elif sel == 10:
+        elif sel == 11:
             if "LEFT" in ev:
                 pg["brick_speed_mult"] = _coerce_mult(float(pg.get("brick_speed_mult", 1.0)) - mult_delta)
             if "RIGHT" in ev:
                 pg["brick_speed_mult"] = _coerce_mult(float(pg.get("brick_speed_mult", 1.0)) + mult_delta)
-        elif sel == 11:
+        elif sel == 12:
             if "LEFT" in ev:
                 pg["memory_reveal_seconds"] = round(clamp(float(pg.get("memory_reveal_seconds", 1.1)) - 0.05, 0.3, 3.0), 2)
             if "RIGHT" in ev:
                 pg["memory_reveal_seconds"] = round(clamp(float(pg.get("memory_reveal_seconds", 1.1)) + 0.05, 0.3, 3.0), 2)
-        elif sel == 12:
+        elif sel == 13:
             if "LEFT" in ev:
                 pg["runner_speed_mult"] = _coerce_mult(float(pg.get("runner_speed_mult", 1.0)) - mult_delta)
             if "RIGHT" in ev:
                 pg["runner_speed_mult"] = _coerce_mult(float(pg.get("runner_speed_mult", 1.0)) + mult_delta)
-        elif sel == 13 and ("LEFT" in ev or "RIGHT" in ev or confirm):
+        elif sel == 14 and ("LEFT" in ev or "RIGHT" in ev or confirm):
             pg["show_tutorial_next_open"] = not bool(pg.get("show_tutorial_next_open", False))
-        elif sel == 14 and confirm:
+        elif sel == 15 and confirm:
             armed = bool(ctx.user.get("_pet_reset_arm", False))
             if not armed:
                 ctx.user["_pet_reset_arm"] = True
@@ -604,7 +632,7 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
                     _pet_set_note(ctx, "Pet state reset.", 2.2)
                 else:
                     _pet_set_note(ctx, "Reset failed.", 2.2)
-        elif sel == 15 and confirm:
+        elif sel == 16 and confirm:
             rel = _export_pet_snapshot(ctx, prefs)
             _pet_set_note(ctx, f"Saved {rel}" if rel else "Snapshot failed.", 2.5)
 

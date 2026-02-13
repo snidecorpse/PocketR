@@ -31,7 +31,7 @@ STAGE_RUNNING = "RUNNING"
 STAGE_DONE = "DONE"
 STAGE_ERROR = "ERROR"
 
-METHOD_DIRECT = "DIRECT_GIT"
+METHOD_KEYSEQ = "KEYSEQ_PULL"
 METHOD_SCRIPT = "SCRIPT_FALLBACK"
 
 UPDATER_PRESETS = [
@@ -275,7 +275,7 @@ def _state(ctx) -> Dict:
     st.setdefault("selected_value", "")
     st.setdefault("candidates", [])
     st.setdefault("attempt_idx", 0)
-    st.setdefault("attempt_method", METHOD_DIRECT)
+    st.setdefault("attempt_method", METHOD_KEYSEQ)
     st.setdefault("attempts", [])
     st.setdefault("current_repo", "")
     st.setdefault("current_branch", "")
@@ -298,7 +298,7 @@ def init(ctx):
         "selected_value": "",
         "candidates": [],
         "attempt_idx": 0,
-        "attempt_method": METHOD_DIRECT,
+        "attempt_method": METHOD_KEYSEQ,
         "attempts": [],
         "current_repo": "",
         "current_branch": "",
@@ -348,18 +348,34 @@ def _launch_attempt(ctx, st: Dict) -> bool:
 
     while int(st.get("attempt_idx", 0)) < len(candidates):
         idx = int(st.get("attempt_idx", 0))
-        method = str(st.get("attempt_method", METHOD_DIRECT) or METHOD_DIRECT)
+        method = str(st.get("attempt_method", METHOD_KEYSEQ) or METHOD_KEYSEQ)
         repo = str(candidates[idx] or "")
-        if not os.path.isdir(repo) or not _is_git_repo(repo):
-            _record_attempt(st, repo, method, "failed", 2, "", "", "")
-            st["attempt_method"] = METHOD_DIRECT
-            st["attempt_idx"] = idx + 1
-            continue
+
+        if method == METHOD_SCRIPT:
+            if not os.path.isdir(repo) or not _is_git_repo(repo):
+                discovered, _checked = _discover_repo_cached(ctx)
+                if discovered and _is_git_repo(discovered):
+                    repo = discovered
+                else:
+                    _record_attempt(st, repo, method, "failed", 2, "", "", "")
+                    st["attempt_method"] = METHOD_KEYSEQ
+                    st["attempt_idx"] = idx + 1
+                    continue
+            st["current_branch"] = _git_branch(repo)
+            st["current_pre_sha"] = _git_sha(repo)
+            _safe_directory(repo)
+        else:
+            info_repo = repo if _is_git_repo(repo) else ""
+            if not info_repo:
+                discovered, _checked = _discover_repo_cached(ctx)
+                if discovered and _is_git_repo(discovered):
+                    info_repo = discovered
+            st["current_branch"] = _git_branch(info_repo) if info_repo else ""
+            st["current_pre_sha"] = _git_sha(info_repo) if info_repo else ""
+            if info_repo:
+                _safe_directory(info_repo)
 
         st["current_repo"] = repo
-        st["current_branch"] = _git_branch(repo)
-        st["current_pre_sha"] = _git_sha(repo)
-        _safe_directory(repo)
 
         try:
             try:
@@ -371,9 +387,16 @@ def _launch_attempt(ctx, st: Dict) -> bool:
             env = os.environ.copy()
             env["POCKETR_REPO"] = repo
 
-            if method == METHOD_DIRECT:
+            if method == METHOD_KEYSEQ:
+                repo_safe = str(repo).replace('"', '\\"')
+                repo_name = os.path.basename(repo_safe.rstrip("/")) or "PocketR"
+                cmd = (
+                    'cd ~ && '
+                    '(cd PocketR || cd pocketr || cd "{name}" || cd "{path}") && '
+                    "git pull"
+                ).format(name=repo_name, path=repo_safe)
                 proc = subprocess.Popen(
-                    ["git", "-C", repo, "pull", "--rebase", "--autostash"],
+                    ["bash", "-lc", cmd],
                     stdout=log_f,
                     stderr=subprocess.STDOUT,
                     env=env,
@@ -395,10 +418,10 @@ def _launch_attempt(ctx, st: Dict) -> bool:
         except Exception as e:
             _record_attempt(st, repo, method, "failed", 3, st.get("current_branch", ""), st.get("current_pre_sha", ""), "")
             st["msg"] = f"Start failed: {e}"
-            if method == METHOD_DIRECT:
+            if method == METHOD_KEYSEQ:
                 st["attempt_method"] = METHOD_SCRIPT
             else:
-                st["attempt_method"] = METHOD_DIRECT
+                st["attempt_method"] = METHOD_KEYSEQ
                 st["attempt_idx"] = idx + 1
             continue
 
@@ -481,7 +504,7 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
             return False
         if confirm:
             st["attempt_idx"] = 0
-            st["attempt_method"] = METHOD_DIRECT
+            st["attempt_method"] = METHOD_KEYSEQ
             st["attempts"] = []
             st["current_repo"] = ""
             st["current_branch"] = ""
@@ -510,7 +533,7 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
         ctx.user.pop("_updater_proc", None)
 
         repo = str(st.get("current_repo", "") or "")
-        method = str(st.get("attempt_method", METHOD_DIRECT) or METHOD_DIRECT)
+        method = str(st.get("attempt_method", METHOD_KEYSEQ) or METHOD_KEYSEQ)
         branch = str(st.get("current_branch", "") or "")
         pre_sha = str(st.get("current_pre_sha", "") or "")
         post_sha = _git_sha(repo) if repo else ""
@@ -526,10 +549,10 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
 
         _record_attempt(st, repo, method, "failed", int(rc), branch, pre_sha, post_sha)
         idx = int(st.get("attempt_idx", 0))
-        if method == METHOD_DIRECT:
+        if method == METHOD_KEYSEQ:
             st["attempt_method"] = METHOD_SCRIPT
         else:
-            st["attempt_method"] = METHOD_DIRECT
+            st["attempt_method"] = METHOD_KEYSEQ
             st["attempt_idx"] = idx + 1
 
         if _launch_attempt(ctx, st):
@@ -665,7 +688,7 @@ def render(ctx) -> Image.Image:
         ty = _draw_wrapped_lines(d, source_line, tx, ty, tw, ctx.font_s, (240, 220, 210), line_h=15)
         ty = _draw_wrapped_lines(
             d,
-            "Method 1: git -C <repo> pull --rebase --autostash\nMethod 2: update_repo.sh fallback",
+            "Method 1: terminal sequence (cd ~, cd PocketR, git pull)\nMethod 2: update_repo.sh fallback",
             tx,
             ty + 2,
             tw,
@@ -689,7 +712,7 @@ def render(ctx) -> Image.Image:
         return img
 
     if stage == STAGE_RUNNING:
-        method = str(st.get("attempt_method", METHOD_DIRECT)).replace("_", " ").lower()
+        method = str(st.get("attempt_method", METHOD_KEYSEQ)).replace("_", " ").lower()
         repo = str(st.get("current_repo", "") or "")
         title = f"{method}: {os.path.basename(repo) or repo}"
         ty = _draw_wrapped_lines(d, title + dots(time.time()), tx, ty, tw, ctx.font_m, (242, 232, 226), line_h=18)

@@ -167,34 +167,105 @@ Configured graph:
 Note: this mapping uses left for Arcade so all four directions are uniquely mapped.
 
 ### Room actions
-- Hall: `Check In`, `Stretch`, `Save & Quit`
+- Hall: `Check In`, `Stretch`, `Take Picture`, `Save & Quit`
 - Bedroom: `Cuddle`, `Give Hug`, `Sleep`
 - Living Room: `Watch TV`, `Lounge`, `Talk`, `Open Gallery`
 - Arcade: `Brick Breaker`, `Memory Match`, `Runner Dash`
-- Bathroom: `Use Toilet`, `Shower`
+- Bathroom: `Use Toilet`, `Shower`, `Night Routine`, `Change Clothes`
 
 ### Arcade mini-games
 - Brick Breaker now has progressive levels (`L1` to `L3`) with increasing brick density/speed.
 - Mini-game play area renders on a full black gameplay canvas (not semi-opaque over room art).
 
 ### Talk system
-- Dialogue is loaded from `game/assets/pet_game/dialogue.json`.
-- JSON keys are categories (for example `greeting`, `feelings`, `plans`, `jokes`).
+- Dialogue is loaded from:
+  - persistent override: `/root/.pocketr/pet/dialogue.json` (or `./.pocketr/pet/dialogue.json` on desktop)
+  - fallback asset: `game/assets/pet_game/dialogue.json`
+- JSON keys are categories (for example `greeting`, `feelings`, `date_night`, `flirty`).
 - Values are arrays of conversation entries:
   - `player` text
   - `pet` text
   - optional stat effects (`social`, `fun`)
+- Loader is tolerant to trailing commas to keep authoring simple.
+- Talk flow is queue-based and scene-rendered:
+  - choose category in the Talk menu
+  - gameplay panel closes
+  - line 1 shows as typewriter: `You: ...`
+  - line 2 shows as typewriter: `Him: ...`
+- Typewriter controls:
+  - `B1`/`PRESS` once: complete current line instantly
+  - `B1`/`PRESS` again: advance to next queued line
+- Category order in the Talk menu follows JSON key order (not alphabetically sorted).
+- Pet-game action/support strings are authored to match the same tone/style as this dialogue file.
 
 ### Sprites
-Loaded from `game/assets/pet_game/`:
-- `idle.png`
-- `walk1.png`
-- `walk2.png`
-- `sleep.png`
-- `shower.png`
-- `toilet.png`
+Primary animated sources are folder-based under:
+- `game/assets/pet_game/Sprites/Walking`
+- `game/assets/pet_game/Sprites/IdleHappy`
+- `game/assets/pet_game/Sprites/IdleSad`
+- `game/assets/pet_game/Sprites/Talking`
+- `game/assets/pet_game/Sprites/HugCuddle`
+- `game/assets/pet_game/Sprites/Sleeping`
+- `game/assets/pet_game/Sprites/Shower`
+- `game/assets/pet_game/Sprites/Changing`
+- `game/assets/pet_game/Sprites/Gaming`
 
-These are placeholder art; replace with your own sprite sheets/assets as needed.
+Expected frame naming:
+- `frame_000.png` ... `frame_015.png` (or any `frame_*.png`)
+
+Render/state mapping:
+- movement -> `Walking`
+- normal idle -> `IdleHappy`
+- low-stat idle -> `IdleSad` (first cycle full pass, then loops from frame 5)
+- talking/support/conversation -> `Talking`
+- cuddle/hug -> `HugCuddle`
+- sleeping -> `Sleeping`
+- shower -> `Shower`
+- night routine/change clothes -> `Changing`
+- arcade idle -> `Gaming`
+
+Legacy single-image files (`idle.png`, `walk1.png`, etc.) are fallback only.
+
+Sizing/depth behavior:
+- each animation category uses a fixed slot size:
+  - `walk_anim` `56x96`
+  - `idle_happy_anim` `56x96`
+  - `idle_sad_anim` `56x96`
+  - `idle_sit_anim` `56x96`
+  - `talking_anim` `64x96`
+  - `shower_anim` `68x98`
+  - `sleeping_anim` `96x64`
+  - `changing_anim` `66x98`
+  - `gaming_anim` `60x96`
+  - `hugcuddle_anim` `74x104`
+- frames are normalized using one canonical scale per animation set (max bbox based), so no tiny-to-big drift within the same animation
+- `sleeping_anim` uses center Y anchor; other states use bottom Y anchor
+- `Sprite Scale` setting applies one uniform global multiplier (`0.85..1.20`) across all slots
+- sprite draw is bottom-anchored for upright states and center-anchored for sleeping
+- sprite is hard-clipped to play area
+- optional room foreground `fg.png` can occlude sprite for depth
+
+### Room art dimensions (authoring spec)
+- Full room canvas: `240 x 240`
+- Top HUD/status reserved area: `y = 0..73`
+- Play frame rectangle:
+  - `x = 6..233`
+  - `y = 74..233`
+  - effective span: `228 x 160` (inclusive coordinates)
+- Sprite hard-clip region:
+  - `x = 8..231`
+  - `y = 76..231`
+  - effective span: `224 x 156`
+- Movement vertical bounds (pet foot-anchor):
+  - top: `y = 124`
+  - bottom: `y = 231`
+- Background/object files:
+  - runtime uses base-only room rendering
+  - each room `base.png` is `240x240`
+  - `Base.png` is also accepted as fallback (compatibility for mixed casing)
+  - `obj_*.png` files are ignored by the renderer
+  - keep room placeholders clean (no baked text, no baked duplicate frame borders)
+  - optional `fg.png` may be added only for intentional foreground occlusion
 
 ### Controls in pet game
 - Move: joystick directions (held)
@@ -204,6 +275,10 @@ These are placeholder art; replace with your own sprite sheets/assets as needed.
 - `B2` long (~1.2s): reopen tutorial slides
 - `B3` short: quick care action
 - Global `B3` hold still performs OS shutdown
+
+Message duration rule:
+- top scene text uses one renderer path for talk/action/support output
+- when an action/talk triggers a pose animation, scene text stays up for the animation window
 
 ## 6.2) Gallery (`game/apps/blank.py`)
 
@@ -378,6 +453,8 @@ Typical file:
   "updater_source_value": "/root/PocketR",
   "pet_game": {
     "sim_speed": 1.0,
+    "sprite_global_scale": 1.0,
+    "sprite_size_preset": "small",
     "difficulty_profile": "normal",
     "decay_hunger_mult": 1.0,
     "decay_energy_mult": 1.0,
@@ -396,6 +473,10 @@ Typical file:
 ```
 
 If missing, defaults are rebuilt in Settings app.
+
+Compatibility note:
+- `pet_game.sprite_size_preset` is deprecated and ignored by sprite runtime sizing.
+- `pet_game.sprite_global_scale` is the active control.
 
 ## 13) Development Workflow
 

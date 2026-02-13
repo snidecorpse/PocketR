@@ -35,10 +35,19 @@ def _gallery_paths(ctx) -> List[str]:
         if age < GALLERY_SCAN_SECONDS and isinstance(paths, list):
             return paths
 
-    root = ctx.asset(GALLERY_DIR)
+    roots: List[str] = [ctx.asset(GALLERY_DIR)]
+    if hasattr(ctx, "data_path"):
+        roots.append(ctx.data_path("gallery"))
+    else:
+        base = str(getattr(ctx, "base_dir", ".") or ".")
+        roots.append(os.path.join(base, ".pocketr", "gallery"))
+
     found: List[str] = []
-    for ext in GALLERY_EXTS:
-        found.extend(glob.glob(os.path.join(root, ext)))
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for ext in GALLERY_EXTS:
+            found.extend(glob.glob(os.path.join(root, ext)))
 
     uniq = sorted({os.path.abspath(p) for p in found})
     out = [p for p in uniq if os.path.isfile(p)]
@@ -220,12 +229,9 @@ def _draw_header(ctx, img: Image.Image, mode_label: str, right: str) -> Tuple[Im
     chip = str(mode_label or "").strip()
     if chip:
         ctw = int(d.textlength(chip, font=ctx.font_s))
-        cx0 = (w - (ctw + 16)) // 2
-        cy0 = 14
-        cx1 = cx0 + ctw + 16
-        cy1 = cy0 + 16
-        d.rounded_rectangle([cx0, cy0, cx1, cy1], radius=5, fill=(16, 10, 12, 210), outline=(255, 214, 204, 120), width=1)
-        d.text((cx0 + 8, cy0 + 3), chip, font=ctx.font_s, fill=(235, 220, 214))
+        cx = (w - ctw) // 2
+        d.text((cx + 1, 15), chip, font=ctx.font_s, fill=(8, 6, 8, 180))
+        d.text((cx, 14), chip, font=ctx.font_s, fill=(235, 220, 214))
 
     tw = int(d.textlength(right, font=ctx.font_s))
     d.text((w - 14 - tw, 16), right, font=ctx.font_s, fill=(220, 210, 205))
@@ -289,21 +295,17 @@ def _render_slide(ctx, img: Image.Image, rect: Tuple[int, int, int, int], cards:
 
     page = f"{idx + 1}/{count}"
     tw = int(d.textlength(page, font=ctx.font_s))
-    px1 = x1 - 10
-    px0 = px1 - tw - 12
-    py0 = y0 + 6
-    py1 = py0 + 14
-    d.rounded_rectangle([px0, py0, px1, py1], radius=5, fill=(14, 10, 12, 205), outline=(255, 210, 198, 110), width=1)
-    d.text((px0 + 6, py0 + 2), page, font=ctx.font_s, fill=(228, 214, 208))
+    px = x1 - 10 - tw
+    d.text((px + 1, y0 + 7), page, font=ctx.font_s, fill=(8, 6, 8, 170))
+    d.text((px, y0 + 6), page, font=ctx.font_s, fill=(228, 214, 208))
 
     if show_filename:
         name = os.path.basename(_gallery_paths(ctx)[idx])
         ntw = int(d.textlength(name, font=ctx.font_s))
-        box_w = min(content_w, ntw + 20)
-        bx0 = content_x + (content_w - box_w) // 2
-        by0 = y1 - 26
-        d.rounded_rectangle([bx0, by0, bx0 + box_w, by0 + 18], radius=6, fill=(8, 8, 10, 198), outline=(255, 210, 198, 130), width=1)
-        d.text((bx0 + (box_w - ntw) // 2, by0 + 3), name, font=ctx.font_s, fill=(235, 225, 220))
+        bx = content_x + max(0, (content_w - ntw) // 2)
+        by = y1 - 24
+        d.text((bx + 1, by + 1), name, font=ctx.font_s, fill=(8, 6, 8, 170))
+        d.text((bx, by), name, font=ctx.font_s, fill=(235, 225, 220))
 
     return img
 

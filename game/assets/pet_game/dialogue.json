@@ -1,58 +1,122 @@
 {
   "greeting": [
     {
-      "player": "Hey little dude.",
-      "pet": "Hey! I was waiting for you.",
+      "player": "Hey love? I miss you",
+      "pet": "I missed you too goofy butt. Come here",
       "social": 5,
       "fun": 2
     },
     {
-      "player": "Morning check-in.",
-      "pet": "Good morning. Ready to hang out.",
+      "player": "How is my favorite guy?",
+      "pet": "Better now that you checked in muehehe",
       "social": 4,
-      "fun": 1
+      "fun": 2
     }
   ],
   "feelings": [
     {
-      "player": "How are you feeling right now?",
-      "pet": "Better when my bars are healthy and we talk.",
+      "player": "How are you feeling today?",
+      "pet": "Super nice when we talk like this.",
       "social": 4,
       "fun": 1
     },
     {
-      "player": "You doing okay?",
-      "pet": "Yeah. Keep me fed, rested, and clean.",
-      "social": 3,
+      "player": "Need anything from me?",
+      "pet": "hugs, cuddles, love....(me and the real version)",
+      "social": 4,
+      "fun": 1
+    },
+    {
+      "player": "Need anything from me?",
+      "pet": "Am I stinky butt? Showerrrrr",
+      "social": 4,
       "fun": 1
     }
   ],
-  "plans": [
+  "date_night": [
     {
-      "player": "What should we do next?",
-      "pet": "Arcade then lounge sounds perfect.",
+      "player": "Ghilbi night or Roblox night?",
+      "pet": "Both. Movie cuddle, then Roblox",
       "social": 3,
-      "fun": 3
-    },
-    {
-      "player": "Any requests?",
-      "pet": "Maybe a shower, then a game.",
-      "social": 2,
-      "fun": 2
-    }
-  ],
-  "jokes": [
-    {
-      "player": "Tell me a joke.",
-      "pet": "I tried coding naps, but I kept getting sleep loops.",
-      "social": 2,
       "fun": 4
     },
     {
-      "player": "Another one.",
-      "pet": "My favorite bug is the one that makes hugs overpowered.",
-      "social": 2,
+      "player": "What should we do tonight?",
+      "pet": "Something gentle & soft and calm",
+      "social": 3,
+      "fun": 3
+    },
+  ],
+  "flirty": [
+    {
+      "player": "You look extra handsome today",
+      "pet": "What!? Say it again (to real me too)",
+      "social": 3,
+      "fun": 4
+    },
+    {
+      "player": "Can I steal a hug?",
+      "pet": "Only if I get two back hehehe",
+      "social": 4,
+      "fun": 3
+    },
+    {
+      "player": "Holdddd meeee",
+      "pet": "hehehehe yes I gotchu",
+      "social": 4,
+      "fun": 3
+    },
+    {
+      "player": "u wan it?",
+      "pet": "Yes I wan it hehe",
+      "social": 4,
       "fun": 3
     }
+  ],
+  "reassurance": [
+    {
+      "player": "I am proud of you.",
+      "pet": "Thank you POOKUMS",
+      "social": 4,
+      "fun": 1
+    },
+    {
+      "player": "I love you okay?",
+      "pet": "I love you moreeeee",
+      "social": 5,
+      "fun": 1
+    },
+    {
+      "player": "You're all mine",
+      "pet": "And I'm all yours hehe",
+      "social": 5,
+      "fun": 1
+    }
+  ],
+  "memories": [
+    {
+      "player": "Ah remember that date in  Olive Garden",
+      "pet": "yea we were geeeked",
+      "social": 4,
+      "fun": 2
+    },
+    {
+      "player": "What is your favorite us memory?",
+      "pet": "Anything we do that's goofy",
+      "social": 3,
+      "fun": 2
+    },
+    {
+      "player": "Ah remember squid games night?",
+      "pet": "yeaaaa and I broke that milk on u hehe",
+      "social": 4,
+      "fun": 2
+    },
+    {
+      "player": "Ah remember kimchi box?",
+      "pet": "yea it was good with squid games",
+      "social": 3,
+      "fun": 2
+    },
   ]
 }
