@@ -158,6 +158,11 @@ Each frame, the simulation:
 
 Current tune:
 - Baseline decay multiplier is `DECAY_TUNE_MULT = 1.25` (slightly faster pace than prior builds).
+- Activity-load scaling increases degradation for high-intensity states:
+  - walking drains more than idle
+  - arcade room drains more than non-arcade rooms
+  - active mini-games apply strongest ongoing drain
+- HP loss threshold is stricter, so extended neglect can now reach game-over more realistically.
 
 ### Rooms and transitions
 Configured graph:
@@ -285,7 +290,8 @@ Sizing/depth behavior:
 - Open action panel: `B1` or joystick `PRESS`
 - Confirm panel item: `B1`
 - `B2` short: quick supportive interaction (or close panel)
-- `B2` long (~1.2s): save + exit pet game
+- `B2` long (~1.6s): save + exit pet game
+  - while holding, pet-game UI shows exit progress
 - `B3` short: quick care action
 - Global `B3` hold still performs OS shutdown
 

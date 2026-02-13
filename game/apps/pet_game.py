@@ -37,7 +37,8 @@ ONBOARD_WELCOME = "intro_welcome.png"
 ONBOARD_CONTROLS = "intro_controls.png"
 
 AGE_ACCEL = 60.0  # 1 real minute = 1 pet hour
-K2_EXIT_HOLD_SECONDS = 1.2
+K2_EXIT_HOLD_SECONDS = 1.6
+K2_EXIT_SHOW_DELAY = 0.35
 B3_SHORT_MAX_SECONDS = 0.85
 PERSIST_SECONDS = 4.0
 
@@ -1134,6 +1135,19 @@ def _base_drain_per_hour(cfg: Dict) -> Dict[str, float]:
     }
 
 
+def _activity_load(st: PetState, moving: bool) -> float:
+    load = 1.0
+    if moving:
+        load += 0.55
+    if st.room == ROOM_ARCADE:
+        load += 0.35
+    if st.play_submode == PLAY_MINIGAME:
+        load += 0.65
+    if st.pose in ("talk", "hugcuddle", "shower", "changing"):
+        load += 0.12
+    return max(1.0, load)
+
+
 def _apply_decay(st: PetState, dt: float, moving: bool, now: float, cfg: Dict) -> None:
     if not st.alive:
         return
@@ -1145,14 +1159,22 @@ def _apply_decay(st: PetState, dt: float, moving: bool, now: float, cfg: Dict) -
     profile = str(cfg.get("difficulty_profile", "normal") or "normal")
     drains = _base_drain_per_hour(cfg)
     profile_decay = float(drains.get("profile_decay", 1.0))
-    mul = 1.35 if moving else 1.0
+    activity_load = _activity_load(st, moving)
+    load_delta = max(0.0, activity_load - 1.0)
 
-    hunger_drop = (drains["hunger"] * mul * profile_decay * float(cfg.get("decay_hunger_mult", 1.0))) * (dt / 3600.0)
-    energy_drop = (drains["energy"] * mul * profile_decay * float(cfg.get("decay_energy_mult", 1.0))) * (dt / 3600.0)
-    hygiene_drop = (drains["hygiene"] * profile_decay * float(cfg.get("decay_hygiene_mult", 1.0))) * (dt / 3600.0)
-    social_drop = (drains["social"] * profile_decay * float(cfg.get("decay_social_mult", 1.0))) * (dt / 3600.0)
-    fun_drop = (drains["fun"] * profile_decay * float(cfg.get("decay_fun_mult", 1.0))) * (dt / 3600.0)
-    bladder_drop = (drains["bladder"] * mul * profile_decay * float(cfg.get("decay_bladder_mult", 1.0))) * (dt / 3600.0)
+    hunger_scale = profile_decay * float(cfg.get("decay_hunger_mult", 1.0)) * (1.0 + (0.62 * load_delta))
+    energy_scale = profile_decay * float(cfg.get("decay_energy_mult", 1.0)) * (1.0 + (0.95 * load_delta))
+    hygiene_scale = profile_decay * float(cfg.get("decay_hygiene_mult", 1.0)) * (1.0 + (0.40 * load_delta))
+    social_scale = profile_decay * float(cfg.get("decay_social_mult", 1.0)) * (1.0 + (0.10 * load_delta))
+    fun_scale = profile_decay * float(cfg.get("decay_fun_mult", 1.0)) * (1.0 + (0.18 * load_delta))
+    bladder_scale = profile_decay * float(cfg.get("decay_bladder_mult", 1.0)) * (1.0 + (0.74 * load_delta))
+
+    hunger_drop = (drains["hunger"] * hunger_scale) * (dt / 3600.0)
+    energy_drop = (drains["energy"] * energy_scale) * (dt / 3600.0)
+    hygiene_drop = (drains["hygiene"] * hygiene_scale) * (dt / 3600.0)
+    social_drop = (drains["social"] * social_scale) * (dt / 3600.0)
+    fun_drop = (drains["fun"] * fun_scale) * (dt / 3600.0)
+    bladder_drop = (drains["bladder"] * bladder_scale) * (dt / 3600.0)
 
     sleeping = st.pose == "sleep" and now < st.pose_until
     if sleeping:
@@ -1179,23 +1201,28 @@ def _apply_decay(st: PetState, dt: float, moving: bool, now: float, cfg: Dict) -
     stress += 0.22 * _def(st.bladder, 24.0)
     stress += 0.05 * _def(st.social, 22.0)
     stress += 0.05 * _def(st.fun, 22.0)
+    stress += 0.08 * _def(st.energy, 36.0) * clamp(load_delta, 0.0, 2.0)
 
     critical_count = sum(1 for v in [st.hunger, st.energy, st.hygiene, st.bladder] if v < 15.0)
 
     hp_loss_hour = 0.0
-    if stress > 0.18:
-        hp_loss_hour += (stress - 0.18) * 4.2
+    if stress > 0.15:
+        hp_loss_hour += (stress - 0.15) * 5.6
     if critical_count >= 2:
-        hp_loss_hour += (critical_count - 1) * 2.2
+        hp_loss_hour += (critical_count - 1) * 2.8
     if critical_count >= 3:
-        hp_loss_hour += 1.5
+        hp_loss_hour += 2.2
+    if critical_count >= 4:
+        hp_loss_hour += 1.2
+    if load_delta > 0.0 and st.energy < 35.0:
+        hp_loss_hour += (clamp(load_delta, 0.0, 1.8) * _def(st.energy, 35.0) * 1.8)
 
     hp_regen_hour = 0.0
     core_min = min(st.hunger, st.energy, st.hygiene, st.bladder)
-    if core_min > 55.0 and st.mood > 58.0:
-        hp_regen_hour = 1.0
-    elif core_min > 40.0:
-        hp_regen_hour = 0.35
+    if core_min > 62.0 and st.mood > 65.0:
+        hp_regen_hour = 0.75
+    elif core_min > 48.0 and st.mood > 52.0:
+        hp_regen_hour = 0.22
 
     profile_loss = 1.0
     profile_regen = 1.0
@@ -2251,6 +2278,7 @@ def update(ctx, dt: float, ev: Dict[str, bool]) -> bool:
     # MODE_PLAY
     if st.play_submode == PLAY_MINIGAME:
         _update_minigame(ctx, st, sim_dt, ev, cfg, now)
+        _apply_decay(st, sim_dt * 1.20, moving=True, now=now, cfg=cfg)
         _save(ctx, st)
         return False
 
@@ -3068,6 +3096,43 @@ def _draw_top_center_text(ctx, img: Image.Image, text: str) -> None:
         y += 15
 
 
+def _draw_k2_exit_overlay(ctx, img: Image.Image, st: PetState, now: float) -> Image.Image:
+    t0 = float(st.k2_hold_t0 or 0.0)
+    if t0 <= 0.0 or (not ctx.inputs.is_down("K2")):
+        return img
+
+    held = max(0.0, now - t0)
+    if held < K2_EXIT_SHOW_DELAY:
+        return img
+
+    denom = max(0.001, K2_EXIT_HOLD_SECONDS - K2_EXIT_SHOW_DELAY)
+    p = clamp((held - K2_EXIT_SHOW_DELAY) / denom, 0.0, 1.0)
+
+    w, h = img.size
+    rect = (18, h - 52, w - 19, h - 16)
+    img = overlay_panel(img, rect, radius=6, fill=(10, 8, 12, 176), outline=(255, 220, 210, 120), width=1)
+    d = ImageDraw.Draw(img, "RGBA")
+    x0, y0, x1, y1 = rect
+
+    label = "Hold B2 to Exit Game"
+    tw = int(d.textlength(label, font=ctx.font_s))
+    d.text((x0 + ((x1 - x0 - tw) // 2), y0 + 6), label, font=ctx.font_s, fill=(245, 232, 226))
+
+    bar_x0 = x0 + 10
+    bar_x1 = x1 - 10
+    bar_y0 = y0 + 22
+    bar_y1 = y0 + 30
+    d.rounded_rectangle([bar_x0, bar_y0, bar_x1, bar_y1], radius=3, fill=(30, 24, 26, 210), outline=(255, 220, 210, 90), width=1)
+    fill_w = int((bar_x1 - bar_x0 - 2) * p)
+    if fill_w > 0:
+        d.rounded_rectangle([bar_x0 + 1, bar_y0 + 1, bar_x0 + 1 + fill_w, bar_y1 - 1], radius=2, fill=(255, 176, 160, 230))
+
+    hint = "Release to cancel"
+    hw = int(d.textlength(hint, font=ctx.font_s))
+    d.text((x0 + ((x1 - x0 - hw) // 2), y0 + 33), hint, font=ctx.font_s, fill=(220, 205, 198))
+    return img
+
+
 def _dialogue_scene_text(st: PetState) -> str:
     if not st.dialogue_active:
         return ""
@@ -3415,4 +3480,5 @@ def render(ctx) -> Image.Image:
     if st.panel_open and (not st.dialogue_active):
         img = _draw_action_panel(ctx, img, st, _dialogue_data(ctx))
 
+    img = _draw_k2_exit_overlay(ctx, img, st, now)
     return img

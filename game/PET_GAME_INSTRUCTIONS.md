@@ -10,7 +10,8 @@ Keep him healthy and happy by balancing needs, interacting in rooms, talking, an
 - Open actions: `B1` or joystick `PRESS`.
 - Confirm selection: `B1`.
 - `B2` short: quick supportive interaction.
-- `B2` long (~1.2s): save + exit pet game.
+- `B2` long (~1.6s): save + exit pet game.
+  - Hold overlay appears with progress; release cancels.
 - `B3` short: quick care action.
 - Exit game: in Hall actions, choose `Save & Quit`.
 - Restart after death: `B1` or joystick `PRESS`.
@@ -72,11 +73,14 @@ Core stats:
 Simulation model:
 1. Age increases continuously using accelerated time (`1 real minute = 1 pet hour`).
 2. Base per-hour drains are applied to hunger, energy, hygiene, social, fun, bladder.
-3. Moving increases some drains.
+3. Activity-load scaling increases drains:
+   - walking > idle
+   - arcade room > non-arcade rooms
+   - mini-games apply strongest ongoing drain
 4. Sleep pose modifies drain/regen behavior.
 5. A stress score is computed from deficits below thresholds.
-6. HP loss starts when stress passes a threshold and compounds with multiple critical vitals.
-7. HP regen applies when core needs are healthy.
+6. HP loss starts at a stricter stress threshold and compounds harder with multiple critical vitals.
+7. HP regen applies only when core needs and mood are healthy.
 8. Mood lerps toward a weighted target from health + needs.
 9. If HP reaches `0`, pet dies and game-over screen is shown.
 
