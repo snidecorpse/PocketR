@@ -156,6 +156,9 @@ Each frame, the simulation:
 6. Smoothly updates mood using weighted stat targets.
 7. Triggers death state at `health <= 0`.
 
+Current tune:
+- Baseline decay multiplier is `DECAY_TUNE_MULT = 1.25` (slightly faster pace than prior builds).
+
 ### Rooms and transitions
 Configured graph:
 - Main Hall (`HUB`): central junction
@@ -169,13 +172,29 @@ Note: this mapping uses left for Arcade so all four directions are uniquely mapp
 ### Room actions
 - Hall: `Check In`, `Stretch`, `Take Picture`, `Save & Quit`
 - Bedroom: `Cuddle`, `Give Hug`, `Sleep`
-- Living Room: `Watch TV`, `Lounge`, `Talk`, `Open Gallery`
-- Arcade: `Brick Breaker`, `Memory Match`, `Runner Dash`
+- Living Room: `Watch TV`, `Lounge`, `Eat Snack`, `Talk`, `Open Gallery`
+- Arcade: `Brick Breaker`, `Memory Match`, `Runner Dash`, `Micro Snake`, `Heart Catch`, `Reflex Tap`
 - Bathroom: `Use Toilet`, `Shower`, `Night Routine`, `Change Clothes`
 
+Living-room snack menu:
+- `Light Snack`: `hunger +8`, `mood +1`, `bladder -1`
+- `Balanced Meal`: `hunger +16`, `energy +3`, `mood +2`, `bladder -3`
+- `Sweet Treat`: `hunger +6`, `fun +7`, `mood +5`, `energy -2`, `hygiene -2`
+- Snack actions share a `45s` cooldown.
+
 ### Arcade mini-games
-- Brick Breaker now has progressive levels (`L1` to `L3`) with increasing brick density/speed.
+- Brick Breaker now uses clear-all progression from `L1` to `L5`.
+  - L1: 1 row, HP1.
+  - L2: 2 rows, HP1.
+  - L3: top row HP2.
+  - L4: 3 rows, top row HP2.
+  - L5: top row HP2 with alternating HP2/HP1 middle row.
+- Added arcade games:
+  - `Micro Snake` (14x14 grid, win at 25 food).
+  - `Heart Catch` (catch hearts, avoid bombs, 3 lives / 35s round).
+  - `Reflex Tap` (10 timing rounds, streak-based scoring).
 - Mini-game play area renders on a full black gameplay canvas (not semi-opaque over room art).
+- Best score is tracked per mini-game in pet state.
 
 ### Talk system
 - Dialogue is loaded from:
@@ -227,20 +246,14 @@ Render/state mapping:
 Legacy single-image files (`idle.png`, `walk1.png`, etc.) are fallback only.
 
 Sizing/depth behavior:
-- each animation category uses a fixed slot size:
-  - `walk_anim` `56x96`
-  - `idle_happy_anim` `56x96`
-  - `idle_sad_anim` `56x96`
-  - `idle_sit_anim` `56x96`
-  - `talking_anim` `64x96`
-  - `shower_anim` `68x98`
-  - `sleeping_anim` `96x64`
-  - `changing_anim` `66x98`
-  - `gaming_anim` `60x96`
-  - `hugcuddle_anim` `74x104`
-- frames are normalized using one canonical scale per animation set (max bbox based), so no tiny-to-big drift within the same animation
+- all animations now share one global reference scale:
+  - reference priority: `IdleHappy`, then `Walking`, then other upright sets
+  - target apparent body height: `92px`
+  - shared sprite canvas: `112x112`
+- frames are normalized with one shared scale factor, so idle/walk no longer appear larger than most action states
 - `sleeping_anim` uses center Y anchor; other states use bottom Y anchor
-- `Sprite Scale` setting applies one uniform global multiplier (`0.85..1.20`) across all slots
+- `Sprite Scale` setting applies one uniform global multiplier (`0.85..1.20`) after shared normalization
+- sprite X is clamped from the active frame width each render to reduce side cutoffs
 - sprite draw is bottom-anchored for upright states and center-anchored for sleeping
 - sprite is hard-clipped to play area
 - optional room foreground `fg.png` can occlude sprite for depth
@@ -272,7 +285,7 @@ Sizing/depth behavior:
 - Open action panel: `B1` or joystick `PRESS`
 - Confirm panel item: `B1`
 - `B2` short: quick supportive interaction (or close panel)
-- `B2` long (~1.2s): reopen tutorial slides
+- `B2` long (~1.2s): save + exit pet game
 - `B3` short: quick care action
 - Global `B3` hold still performs OS shutdown
 

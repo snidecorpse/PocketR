@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import glob
 import os
 import time
 from typing import Dict, List, Tuple
@@ -11,7 +10,7 @@ from ..ui_common import app_background, overlay_panel
 
 
 GALLERY_DIR = "blank_gallery"
-GALLERY_EXTS = ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.webp")
+GALLERY_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 GALLERY_SCAN_SECONDS = 1.0
 
 
@@ -46,8 +45,16 @@ def _gallery_paths(ctx) -> List[str]:
     for root in roots:
         if not os.path.isdir(root):
             continue
-        for ext in GALLERY_EXTS:
-            found.extend(glob.glob(os.path.join(root, ext)))
+        try:
+            for name in os.listdir(root):
+                p = os.path.join(root, name)
+                if not os.path.isfile(p):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext in GALLERY_EXTS:
+                    found.append(p)
+        except Exception:
+            continue
 
     uniq = sorted({os.path.abspath(p) for p in found})
     out = [p for p in uniq if os.path.isfile(p)]

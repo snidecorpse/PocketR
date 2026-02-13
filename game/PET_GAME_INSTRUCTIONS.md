@@ -10,7 +10,7 @@ Keep him healthy and happy by balancing needs, interacting in rooms, talking, an
 - Open actions: `B1` or joystick `PRESS`.
 - Confirm selection: `B1`.
 - `B2` short: quick supportive interaction.
-- `B2` long (~1.2s): reopen tutorial slides.
+- `B2` long (~1.2s): save + exit pet game.
 - `B3` short: quick care action.
 - Exit game: in Hall actions, choose `Save & Quit`.
 - Restart after death: `B1` or joystick `PRESS`.
@@ -37,6 +37,7 @@ Bedroom:
 Living:
 - `Watch TV`
 - `Lounge`
+- `Eat Snack` (opens 3-choice snack menu with cooldown)
 - `Talk` (opens category menu, then typewriter dialogue)
 - `Open Gallery` (app jump)
 
@@ -50,6 +51,9 @@ Arcade:
 - `Brick Breaker`
 - `Memory Match`
 - `Runner Dash`
+- `Micro Snake`
+- `Heart Catch`
+- `Reflex Tap`
 
 ## 4) Dialogue System
 Talk actions are queue-based:
@@ -77,7 +81,7 @@ Simulation model:
 9. If HP reaches `0`, pet dies and game-over screen is shown.
 
 Decay tuning:
-- Current build is slightly faster than before (`DECAY_TUNE_MULT = 1.12`).
+- Current build is slightly faster than before (`DECAY_TUNE_MULT = 1.25`).
 
 ## 6) Death and Restart
 When HP reaches zero:
@@ -91,12 +95,13 @@ Animation folders are read from `game/assets/pet_game/Sprites/`:
 - `Walking`, `IdleHappy`, `IdleSad`, `Talking`, `HugCuddle`, `Sleeping`, `Shower`, `Changing`, `Gaming`
 
 Pipeline:
-1. Each animation category uses a fixed slot (`walk 56x96`, `talk 64x96`, `sleep 96x64`, etc.).
-2. Runtime computes one canonical set scale from max alpha bounds across frames in that folder.
-3. Every frame in that set uses the same scale (prevents tiny-to-big drift).
+1. Runtime picks a single scale reference from `IdleHappy` (fallback `Walking`).
+2. Target apparent body height is `92px` on a shared `112x112` sprite canvas.
+3. One shared scale factor is applied to all animation folders.
 4. `sleeping` uses center Y anchor; upright states use bottom Y anchor.
-5. `Sprite Scale` in settings applies one uniform global multiplier (`0.85..1.20`) to all animation slots.
+5. `Sprite Scale` in settings applies one uniform global multiplier (`0.85..1.20`) after shared normalization.
 6. Left-facing states are mirrored automatically based on movement/facing.
+7. X-position is clamped from active frame width to reduce side cutoffs.
 
 Idle sad special rule:
 - First loop runs full sequence once.
@@ -104,7 +109,8 @@ Idle sad special rule:
 
 ## 8) Minigames
 Brick Breaker:
-- Multi-level progression (`L1` to `L3`), denser/faster as level rises.
+- Clear-all progression (`L1` to `L5`) with proper level gating.
+- `LEVEL UP` flash appears briefly on transitions.
 
 Memory Match:
 - 2x3 card grid, match all pairs.
@@ -112,8 +118,29 @@ Memory Match:
 Runner Dash:
 - Auto-run obstacle dodge with jump input.
 
+Micro Snake:
+- 14x14 grid.
+- Directional input updates heading (reverse-direction blocked).
+- Win at 25 food; collision with wall/body ends run.
+
+Heart Catch:
+- Move basket left/right.
+- Catch hearts, avoid bombs.
+- 3 lives, 35-second round.
+
+Reflex Tap:
+- Moving marker crosses a hit lane.
+- Press `B1`/`PRESS` to score timing hits.
+- 10 rounds with streak-based points.
+
 Exit any minigame:
 - `B2`
+
+Snack submenu (`Living -> Eat Snack`):
+- `Light Snack`: `hunger +8`, `mood +1`, `bladder -1`
+- `Balanced Meal`: `hunger +16`, `energy +3`, `mood +2`, `bladder -3`
+- `Sweet Treat`: `hunger +6`, `fun +7`, `mood +5`, `energy -2`, `hygiene -2`
+- Cooldown: `45s`
 
 ## 9) Authoring Specs for Room Art
 Room asset dimensions:
