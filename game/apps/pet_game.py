@@ -32,6 +32,7 @@ BRICK_MAX_LEVELS = 5
 
 STATE_REL_PATH = "pet/state.json"
 DIALOGUE_REL_PATH = "pet/dialogue.json"
+OVERRIDE_PET_GAME_REL_ROOT = "pet/overrides/pet_game"
 
 ONBOARD_WELCOME = "intro_welcome.png"
 ONBOARD_CONTROLS = "intro_controls.png"
@@ -232,6 +233,24 @@ def _to_dict(st: PetState) -> Dict:
 
 def _asset_path(ctx, name: str) -> str:
     return ctx.asset("pet_game", name)
+
+
+def _override_root(ctx) -> str:
+    if hasattr(ctx, "data_path"):
+        return ctx.data_path(*OVERRIDE_PET_GAME_REL_ROOT.split("/"))
+    base = str(getattr(ctx, "base_dir", ".") or ".")
+    return os.path.join(base, ".pocketr", *OVERRIDE_PET_GAME_REL_ROOT.split("/"))
+
+
+def _override_path(ctx, *parts: str) -> str:
+    return os.path.join(_override_root(ctx), *parts)
+
+
+def _asset_or_override_file(ctx, name: str) -> Tuple[str, str]:
+    override = _override_path(ctx, name)
+    if os.path.isfile(override):
+        return override, "override"
+    return _asset_path(ctx, name), "asset"
 
 
 def _play_rect(size: Tuple[int, int]) -> Tuple[int, int, int, int]:
@@ -578,26 +597,38 @@ def _normalize_anim_frames(
     return out
 
 
-def _anim_frame_paths(ctx, subdir: str) -> List[str]:
-    root = ctx.asset("pet_game", "Sprites", subdir)
+def _anim_frame_paths(ctx, subdir: str) -> Tuple[List[str], str, str]:
+    override_root = _override_path(ctx, "Sprites", subdir)
     paths: List[str] = []
-    if os.path.isdir(root):
-        for name in sorted(os.listdir(root)):
+    if os.path.isdir(override_root):
+        for name in sorted(os.listdir(override_root)):
             low = name.lower()
             if not low.endswith(".png"):
                 continue
             if not low.startswith("frame_"):
                 continue
-            paths.append(os.path.join(root, name))
-    return paths
-
-
-def _first_anim_paths(ctx, names: List[str]) -> Tuple[str, List[str]]:
-    for name in names:
-        paths = _anim_frame_paths(ctx, name)
+            paths.append(os.path.join(override_root, name))
         if paths:
-            return name, paths
-    return "", []
+            return paths, override_root, "override"
+
+    asset_root = ctx.asset("pet_game", "Sprites", subdir)
+    if os.path.isdir(asset_root):
+        for name in sorted(os.listdir(asset_root)):
+            low = name.lower()
+            if not low.endswith(".png"):
+                continue
+            if not low.startswith("frame_"):
+                continue
+            paths.append(os.path.join(asset_root, name))
+    return paths, asset_root, "asset"
+
+
+def _first_anim_paths(ctx, names: List[str]) -> Tuple[str, List[str], str, str]:
+    for name in names:
+        paths, root, source = _anim_frame_paths(ctx, name)
+        if paths:
+            return name, paths, root, source
+    return "", [], "", "asset"
 
 
 def _load_anim_frames(paths: List[str]) -> List[Image.Image]:
@@ -630,11 +661,11 @@ def _load_sprites(ctx) -> Dict[str, object]:
     global_scale = _sprite_global_scale(ctx)
     mtags: List[str] = []
     for k, fname in SPRITE_FILES.items():
-        p = _asset_path(ctx, fname)
+        p, src = _asset_or_override_file(ctx, fname)
         try:
-            mtags.append(f"{k}:{int(os.path.getmtime(p))}")
+            mtags.append(f"{k}:{src}:{int(os.path.getmtime(p))}")
         except Exception:
-            mtags.append(f"{k}:0")
+            mtags.append(f"{k}:{src}:0")
 
     anim_sources = {
         "walking": ["Walking"],
@@ -651,14 +682,13 @@ def _load_sprites(ctx) -> Dict[str, object]:
 
     anim_paths: Dict[str, List[str]] = {}
     for tag, names in anim_sources.items():
-        subdir, paths = _first_anim_paths(ctx, names)
+        subdir, paths, root, root_source = _first_anim_paths(ctx, names)
         anim_paths[tag] = paths
         if subdir:
-            root = ctx.asset("pet_game", "Sprites", subdir)
             try:
-                mtags.append(f"{subdir}:{int(os.path.getmtime(root))}")
+                mtags.append(f"{subdir}:{root_source}:{int(os.path.getmtime(root))}")
             except Exception:
-                mtags.append(f"{subdir}:0")
+                mtags.append(f"{subdir}:{root_source}:0")
         for p in paths:
             try:
                 mtags.append(f"{tag}:{int(os.path.getmtime(p))}:{os.path.basename(p)}")
@@ -678,7 +708,7 @@ def _load_sprites(ctx) -> Dict[str, object]:
     raw_walk1: Optional[Image.Image] = None
     raw_walk2: Optional[Image.Image] = None
     for key_name, attr in (("idle", "raw_idle"), ("walk1", "raw_walk1"), ("walk2", "raw_walk2")):
-        p = _asset_path(ctx, SPRITE_FILES[key_name])
+        p, _src = _asset_or_override_file(ctx, SPRITE_FILES[key_name])
         try:
             img = Image.open(p).convert("RGBA")
             if attr == "raw_idle":
@@ -705,7 +735,7 @@ def _load_sprites(ctx) -> Dict[str, object]:
     fallback_center = "sleeping_anim" in SPRITE_CENTER_ANCHOR_ANIMS
 
     def _single_from_path(name: str, center_anchor: bool = False) -> Image.Image:
-        p = _asset_path(ctx, name)
+        p, _src = _asset_or_override_file(ctx, name)
         try:
             src = Image.open(p).convert("RGBA")
             norm = _normalize_anim_frames([src], shared_scale, center_anchor=center_anchor)
@@ -2452,18 +2482,26 @@ def _load_layered_room(ctx, room: str, size: Tuple[int, int]) -> Image.Image:
     room_info = ROOMS.get(room, ROOMS[ROOM_HUB])
     slug = str(room_info.get("slug", "hub"))
 
-    base_path = ctx.asset("pet_game", "rooms", slug, "base.png")
-    if not os.path.isfile(base_path):
-        alt_path = ctx.asset("pet_game", "rooms", slug, "Base.png")
-        if os.path.isfile(alt_path):
-            base_path = alt_path
+    base_path = ""
+    source = "missing"
+    candidates = [
+        (_override_path(ctx, "rooms", slug, "base.png"), "override"),
+        (_override_path(ctx, "rooms", slug, "Base.png"), "override"),
+        (ctx.asset("pet_game", "rooms", slug, "base.png"), "asset"),
+        (ctx.asset("pet_game", "rooms", slug, "Base.png"), "asset"),
+    ]
+    for p, src in candidates:
+        if os.path.isfile(p):
+            base_path = p
+            source = src
+            break
 
     try:
         base_mtime = int(os.path.getmtime(base_path))
     except Exception:
         base_mtime = 0
 
-    key = f"{room}:base-only:{w}x{h}:{base_path}:{base_mtime}"
+    key = f"{room}:base-only:{w}x{h}:{source}:{base_path}:{base_mtime}"
     cache = ctx.user.get("_pet_room_cache", {})
     if isinstance(cache, dict) and cache.get("key") == key and isinstance(cache.get("img"), Image.Image):
         return cache["img"].copy()
@@ -2498,14 +2536,24 @@ def _load_room_foreground(ctx, room: str, size: Tuple[int, int]) -> Image.Image:
     w, h = size
     room_info = ROOMS.get(room, ROOMS[ROOM_HUB])
     slug = str(room_info.get("slug", "hub"))
-    fg_path = ctx.asset("pet_game", "rooms", slug, "fg.png")
+    fg_path = ""
+    source = "missing"
+    fg_candidates = [
+        (_override_path(ctx, "rooms", slug, "fg.png"), "override"),
+        (ctx.asset("pet_game", "rooms", slug, "fg.png"), "asset"),
+    ]
+    for p, src in fg_candidates:
+        if os.path.isfile(p):
+            fg_path = p
+            source = src
+            break
 
     try:
         fg_mtime = int(os.path.getmtime(fg_path))
     except Exception:
         fg_mtime = 0
 
-    key = f"{room}:fg:{w}x{h}:{fg_mtime}"
+    key = f"{room}:fg:{w}x{h}:{source}:{fg_path}:{fg_mtime}"
     cache = ctx.user.get("_pet_room_fg_cache", {})
     if isinstance(cache, dict) and cache.get("key") == key and isinstance(cache.get("img"), Image.Image):
         return cache["img"].copy()

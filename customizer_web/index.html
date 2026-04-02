@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PocketR Customizer</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="page-noise" aria-hidden="true"></div>
+
+  <header class="hero" id="top">
+    <div class="hero-glow" aria-hidden="true"></div>
+    <p class="eyebrow">PocketR Creator Surface</p>
+    <h1>Customize your pet world without touching game logic</h1>
+    <p class="hero-copy">
+      Step through visuals and dialogue in order, stage your draft, then apply.
+      Live preview stays visible while you work.
+    </p>
+    <button id="start-btn" class="btn btn-primary">Start Customizing</button>
+  </header>
+
+  <main class="layout" id="editor-root">
+    <section class="panel flow-panel">
+      <div class="flow-intro">
+        <p>
+          User-facing customization only: backgrounds, sprites, dialogue.
+          No gameplay/debug tuning controls are changed here.
+        </p>
+      </div>
+
+      <div class="flow-nav">
+        <button id="step-prev-btn" class="btn nav-btn" aria-label="Previous step">&lt;</button>
+        <h2 id="step-title">Background</h2>
+        <button id="step-next-btn" class="btn nav-btn" aria-label="Next step">&gt;</button>
+      </div>
+      <p id="step-caption" class="step-caption">Step 1 of 3</p>
+
+      <div id="step-background" class="flow-step is-active">
+        <div class="section-head">
+          <h3>Room Backgrounds</h3>
+          <p>Upload one image per room. Output is normalized to 240x240 PNG on apply.</p>
+        </div>
+        <div id="background-grid" class="cards"></div>
+      </div>
+
+      <div id="step-sprites" class="flow-step" hidden>
+        <div class="section-head">
+          <h3>Sprite Animations</h3>
+          <p>Upload frame sets for animation folders. PNG only.</p>
+        </div>
+        <div id="anim-grid" class="cards"></div>
+
+        <div class="section-head sub">
+          <h3>Single Sprite Fallbacks</h3>
+          <p>Optional fallback images for core states.</p>
+        </div>
+        <div id="single-grid" class="cards"></div>
+      </div>
+
+      <div id="step-dialogue" class="flow-step" hidden>
+        <div class="section-head">
+          <h3>Dialogue Editor</h3>
+          <p>All categories from your dialogue JSON are loaded and editable.</p>
+        </div>
+
+        <div class="dialogue-toolbar">
+          <button id="add-category-btn" class="btn">Add Category</button>
+          <button id="save-dialogue-btn" class="btn btn-primary">Stage Dialogue Draft</button>
+          <button id="clear-dialogue-btn" class="btn btn-danger">Clear Dialogue Override</button>
+        </div>
+
+        <div class="dialogue-layout">
+          <aside id="category-list" class="category-list"></aside>
+          <div class="dialogue-rows-wrap">
+            <div class="dialogue-rows-header">
+              <h3 id="active-category-label">Category</h3>
+              <button id="add-row-btn" class="btn">Add Row</button>
+              <button id="rename-category-btn" class="btn">Rename</button>
+              <button id="delete-category-btn" class="btn btn-danger">Delete Category</button>
+            </div>
+            <div id="dialogue-rows" class="dialogue-rows"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-next-row">
+        <button id="step-save-next-btn" class="btn btn-primary">Save &amp; Next</button>
+      </div>
+    </section>
+
+    <aside class="panel preview-panel" id="preview-panel">
+      <h2>Live Preview</h2>
+      <div class="preview-controls">
+        <label>
+          Room
+          <select id="preview-room"></select>
+        </label>
+        <label>
+          Sprite Group
+          <select id="preview-group"></select>
+        </label>
+        <label>
+          Frame
+          <input id="preview-frame" type="range" min="0" max="15" value="0" />
+        </label>
+      </div>
+      <canvas id="preview-canvas" width="240" height="240"></canvas>
+      <p id="preview-meta" class="preview-meta"></p>
+      <p class="preview-note">Preview composites room + sprite + dialogue sample.</p>
+    </aside>
+  </main>
+
+  <footer class="action-bar" id="action-bar">
+    <div class="action-left">
+      <button id="validate-btn" class="btn">Validate</button>
+      <button id="apply-btn" class="btn btn-primary">Apply</button>
+      <button id="discard-btn" class="btn btn-danger">Discard Draft</button>
+    </div>
+    <div class="action-right">
+      <select id="snapshot-select"></select>
+      <button id="download-snapshot-btn" class="btn">Download Snapshot</button>
+      <button id="restore-btn" class="btn">Restore Snapshot</button>
+    </div>
+    <p id="status-line" class="status-line">Loading customizer...</p>
+  </footer>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
