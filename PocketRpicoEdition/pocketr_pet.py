@@ -1,17 +1,7 @@
 """
-PocketR Pico Edition V1
+PocketR Pico Edition V2 pet core.
 
-Single-file Micropython-safe pet engine for the PocketR tamagotchi core.
-
-Usage example:
-
-    pet = PocketRPet()
-    pet.load()
-    pet.tick()
-    print(pet.snapshot())
-    print(pet.move("RIGHT"))
-    print(pet.do_action("Cuddle"))
-    pet.save()
+Headless tamagotchi engine for the Pico LCD app.
 """
 
 try:
@@ -27,163 +17,76 @@ except ImportError:
 import os
 
 
-VERSION = 1
-MAX_STAT = 100.0
-MIN_STAT = 0.0
-AGE_ACCEL = 60.0  # 1 real minute = 1 pet hour
+SAVE_VERSION = 2
+ROOM_MAIN = "MAIN"
+ROOM_ARCADE = "ARCADE"
+ROOM_BATHROOM = "BATHROOM"
+ROOM_BEDROOM = "BEDROOM"
+ACTIVITY_NONE = "NONE"
+ACTIVITY_HEART_CATCH = "HEART_CATCH"
+
+AGE_ACCEL = 60.0
 MAX_OFFLINE_SECONDS = 7 * 24 * 60 * 60
 CATCHUP_STEP_SECONDS = 300.0
-MOVE_LOAD_SECONDS = 10 * 60.0
-MOVE_LOAD_BONUS = 0.15
-ARCADE_ROOM_BONUS = 0.18
-
-ROOM_HALL = "HALL"
-ROOM_BEDROOM = "BEDROOM"
-ROOM_LIVING = "LIVING"
-ROOM_BATHROOM = "BATHROOM"
-ROOM_ARCADE = "ARCADE"
+MAX_STAT = 100.0
+MIN_STAT = 0.0
 
 ROOMS = {
-    ROOM_HALL: {
-        "neighbors": {
-            "LEFT": ROOM_ARCADE,
-            "RIGHT": ROOM_BEDROOM,
-            "UP": ROOM_BATHROOM,
-            "DOWN": ROOM_LIVING,
-        },
-        "actions": ["Check In", "Stretch"],
-    },
-    ROOM_BEDROOM: {
-        "neighbors": {"LEFT": ROOM_HALL},
-        "actions": ["Cuddle", "Give Hug", "Sleep"],
-    },
-    ROOM_LIVING: {
-        "neighbors": {"UP": ROOM_HALL},
-        "actions": [
-            "Watch TV",
-            "Lounge",
-            "Light Snack",
-            "Balanced Meal",
-            "Sweet Treat",
-            "Talk",
-        ],
-    },
-    ROOM_BATHROOM: {
-        "neighbors": {"DOWN": ROOM_HALL},
-        "actions": ["Use Toilet", "Shower", "Night Routine", "Change Clothes"],
-    },
-    ROOM_ARCADE: {
-        "neighbors": {"RIGHT": ROOM_HALL},
-        "actions": ["Arcade Session"],
-    },
+    ROOM_MAIN: {"name": "Main", "neighbors": (ROOM_ARCADE, ROOM_BATHROOM, ROOM_BEDROOM)},
+    ROOM_ARCADE: {"name": "Arcade", "neighbors": (ROOM_MAIN,)},
+    ROOM_BATHROOM: {"name": "Bathroom", "neighbors": (ROOM_MAIN,)},
+    ROOM_BEDROOM: {"name": "Bedroom", "neighbors": (ROOM_MAIN,)},
+}
+
+ROOM_GRAPH = {
+    ROOM_MAIN: (ROOM_ARCADE, ROOM_BATHROOM, ROOM_BEDROOM),
+    ROOM_ARCADE: (ROOM_MAIN,),
+    ROOM_BATHROOM: (ROOM_MAIN,),
+    ROOM_BEDROOM: (ROOM_MAIN,),
 }
 
 BASE_DRAINS_PER_HOUR = {
-    "hunger": 6.25,
-    "energy": 5.25,
-    "hygiene": 3.00,
-    "social": 2.50,
-    "fun": 2.75,
-    "bladder": 5.75,
+    "hunger": 5.6,
+    "hygiene": 3.8,
+    "fun": 3.0,
+    "love": 2.6,
 }
 
 MOVE_COSTS = {
-    "energy": -0.8,
-    "hunger": -0.4,
-    "bladder": -0.5,
+    "hunger": -1.2,
+    "hygiene": -0.6,
 }
 
-ACTION_WINDOWS = {
-    "Check In": (0.05, 5 * 60.0),
-    "Stretch": (0.05, 5 * 60.0),
-    "Cuddle": (0.22, 12 * 60.0),
-    "Give Hug": (0.22, 12 * 60.0),
-    "Sleep": (0.0, 0.0),
-    "Watch TV": (0.12, 8 * 60.0),
-    "Lounge": (0.05, 5 * 60.0),
-    "Light Snack": (0.12, 8 * 60.0),
-    "Balanced Meal": (0.12, 8 * 60.0),
-    "Sweet Treat": (0.12, 8 * 60.0),
-    "Talk": (0.05, 5 * 60.0),
-    "Use Toilet": (0.12, 8 * 60.0),
-    "Shower": (0.12, 10 * 60.0),
-    "Night Routine": (0.22, 12 * 60.0),
-    "Change Clothes": (0.12, 10 * 60.0),
-    "Arcade Session": (0.40, 20 * 60.0),
-}
-
-ACTION_EFFECTS = {
-    "Check In": {"social": 3, "mood": 2, "fun": 1},
-    "Stretch": {"energy": 2, "mood": 1, "fun": 1},
-    "Cuddle": {"social": 8, "mood": 6, "energy": -2, "fun": 3},
-    "Give Hug": {"social": 7, "mood": 5, "fun": 2, "energy": -1},
-    "Sleep": {"energy": 14, "mood": 4, "hunger": -3, "bladder": -5},
-    "Watch TV": {"fun": 7, "social": 1, "energy": -2, "hunger": -1},
-    "Lounge": {"energy": 6, "mood": 3, "fun": 2, "bladder": -2},
-    "Light Snack": {"hunger": 8, "mood": 1, "bladder": -1},
-    "Balanced Meal": {"hunger": 16, "energy": 3, "mood": 2, "bladder": -3},
-    "Sweet Treat": {"hunger": 6, "fun": 7, "mood": 5, "energy": -2, "hygiene": -2},
-    "Talk": {"social": 4, "fun": 2, "mood": 2},
-    "Use Toilet": {"bladder": 38, "hygiene": -3, "mood": 1},
-    "Shower": {"hygiene": 34, "mood": 5, "energy": -3},
-    "Night Routine": {"hygiene": 18, "energy": 11, "mood": 7, "social": 2, "bladder": -6, "hunger": -3},
-    "Change Clothes": {"mood": 5, "hygiene": 2, "social": 1},
-    "Arcade Session": {"fun": 9, "mood": 6, "energy": -4, "hunger": -2, "bladder": -2},
-}
-
-ACTION_MESSAGES = {
-    "Check In": "You checked in on him. He feels noticed.",
-    "Stretch": "Tiny stretch break done. He loosened up.",
-    "Cuddle": "Cuddle time helped him feel safe and close.",
-    "Give Hug": "Big hug delivered. He brightened up right away.",
-    "Sleep": "He got some rest and recovered a bit.",
-    "Watch TV": "Cozy TV time together lifted his mood.",
-    "Lounge": "He relaxed for a while and settled down.",
-    "Light Snack": "Light snack shared. He feels a little better.",
-    "Balanced Meal": "Balanced meal done. He looks recharged.",
-    "Sweet Treat": "Sweet treat time. He is extra playful now.",
-    "Talk": "You spent a little time talking with him.",
-    "Use Toilet": "Bathroom break handled. He feels relieved.",
-    "Shower": "Shower done. He feels fresh and clean.",
-    "Night Routine": "Night routine complete. He feels calmer.",
-    "Change Clothes": "Outfit change done. He feels refreshed.",
-    "Arcade Session": "Arcade time was fun, but it tired him out.",
-}
-
-TALK_PAIRS = [
-    ("You: I missed you today.", "Him: I missed you too. Stay with me a bit."),
-    ("You: How are you holding up?", "Him: Better now that you checked on me."),
-    ("You: I wanted to spend time with you.", "Him: That means a lot to me."),
-    ("You: You are doing okay.", "Him: I needed to hear that from you."),
-    ("You: Come here for a minute.", "Him: I am here. I like this."),
-    ("You: I have been thinking about you.", "Him: Then today already feels better."),
-]
+TALK_PAIRS = (
+    ("You: Hey, I am here with you.", "Him: I feel better when you stay close."),
+    ("You: I missed you a little today.", "Him: Then come spend a little time with me."),
+    ("You: Are you doing okay?", "Him: Better now that you checked on me."),
+    ("You: I wanted to talk to you.", "Him: I always like hearing your voice."),
+    ("You: You mean a lot to me.", "Him: That makes my whole day softer."),
+    ("You: Come here for a second.", "Him: Okay. I am right here."),
+    ("You: I was thinking about you.", "Him: Then I already feel loved."),
+    ("You: Let us just stay like this.", "Him: I would like that a lot."),
+)
 
 DEFAULT_STATE = {
-    "version": VERSION,
-    "room": ROOM_HALL,
+    "version": SAVE_VERSION,
+    "room": ROOM_MAIN,
     "alive": True,
     "death_reason": "",
     "age_seconds": 0.0,
-    "sim_clock": 0.0,
     "last_epoch": 0.0,
-    "health": 96.0,
-    "hunger": 82.0,
-    "energy": 86.0,
-    "hygiene": 78.0,
-    "social": 72.0,
-    "fun": 72.0,
-    "bladder": 68.0,
-    "mood": 84.0,
-    "move_load_until_clock": 0.0,
-    "action_load_bonus": 0.0,
-    "action_load_until_clock": 0.0,
+    "wellness": 100.0,
+    "fun": 74.0,
+    "hunger": 78.0,
+    "hygiene": 76.0,
+    "love": 82.0,
     "talk_index": 0,
-    "hugs_given": 0,
-    "cuddles_shared": 0,
-    "talk_sessions": 0,
+    "feed_count": 0,
+    "talk_count": 0,
+    "clean_count": 0,
+    "love_count": 0,
     "arcade_sessions": 0,
-    "snacks_given": 0,
+    "heart_catch_best": 0,
     "last_message": "He is ready.",
 }
 
@@ -215,7 +118,7 @@ def _valid_epoch(value):
     return value
 
 
-def _safe_time_time():
+def _safe_epoch_time():
     try:
         return _valid_epoch(_time.time())
     except Exception:
@@ -296,48 +199,77 @@ def _write_json(path, data):
             return False
 
 
+def _is_v2_state(raw):
+    required = (
+        "version",
+        "room",
+        "alive",
+        "death_reason",
+        "age_seconds",
+        "last_epoch",
+        "wellness",
+        "fun",
+        "hunger",
+        "hygiene",
+        "love",
+        "talk_index",
+        "feed_count",
+        "talk_count",
+        "clean_count",
+        "love_count",
+        "arcade_sessions",
+        "heart_catch_best",
+        "last_message",
+    )
+    if not isinstance(raw, dict):
+        return False
+    if int(raw.get("version", -1)) != SAVE_VERSION:
+        return False
+    for key in required:
+        if key not in raw:
+            return False
+    return True
+
+
 def _merge_state(raw):
     state = _copy_default_state()
-    if not isinstance(raw, dict):
-        return state
     for key in state:
         if key in raw:
             state[key] = raw[key]
-    try:
-        state["version"] = int(raw.get("version", VERSION))
-    except Exception:
-        state["version"] = VERSION
+    state["version"] = SAVE_VERSION
     return state
 
 
-def _age_label(age_seconds):
-    total = int(max(0.0, float(age_seconds)))
-    if total < 60:
-        return "%ds" % total
-    minutes = total // 60
-    if minutes < 60:
-        return "%dm" % minutes
-    hours = minutes // 60
-    rem_minutes = minutes % 60
-    if hours < 24:
-        return "%dh %dm" % (hours, rem_minutes)
-    days = hours // 24
-    rem_hours = hours % 24
-    return "%dd %dh" % (days, rem_hours)
+def _deficit(value, threshold):
+    if value >= threshold:
+        return 0.0
+    return clamp((threshold - value) / threshold, 0.0, 1.0)
 
 
-def _mood_word(state):
-    if float(state["hygiene"]) < 24.0:
-        return "Dirty"
-    if float(state["energy"]) < 24.0:
-        return "Tired"
-    if float(state["social"]) < 30.0 or float(state["fun"]) < 30.0:
-        return "Misses You"
-    if float(state["mood"]) >= 72.0:
-        return "Happy"
-    if float(state["mood"]) >= 44.0:
-        return "Okay"
-    return "Sad"
+def _day_label(age_seconds):
+    days = int(float(age_seconds) // 86400.0) + 1
+    if days < 1:
+        days = 1
+    return "D%d" % days
+
+
+def heart_catch_reward(score):
+    try:
+        score = int(score)
+    except Exception:
+        score = 0
+    if score < 0:
+        score = 0
+    fun_gain = min(22, 6 + score)
+    love_gain = min(6, score // 4)
+    hunger_loss = min(8, 2 + score // 3)
+    hygiene_loss = min(6, 1 + score // 4)
+    return {
+        "fun_gain": int(fun_gain),
+        "love_gain": int(love_gain),
+        "hunger_loss": int(hunger_loss),
+        "hygiene_loss": int(hygiene_loss),
+    }
 
 
 class PocketRPet:
@@ -345,6 +277,7 @@ class PocketRPet:
         self.save_path = save_path
         self.now_fn = now_fn
         self.state = _copy_default_state()
+        self._runtime_activity = ACTIVITY_NONE
 
     def _resolve_now(self, now=None):
         direct = _valid_epoch(now)
@@ -355,55 +288,57 @@ class PocketRPet:
                 return _valid_epoch(self.now_fn())
             except Exception:
                 pass
-        return _safe_time_time()
+        return _safe_epoch_time()
 
-    def _set_last_message(self, text):
+    def _set_message(self, text):
         self.state["last_message"] = str(text)
 
     def _boost(self, effects):
         for key in effects:
-            if key not in self.state:
-                continue
-            self.state[key] = clamp(
-                float(self.state[key]) + float(effects[key]),
-                MIN_STAT,
-                MAX_STAT,
-            )
+            if key in self.state:
+                self.state[key] = clamp(float(self.state[key]) + float(effects[key]), MIN_STAT, MAX_STAT)
 
-    def _set_move_window(self):
-        self.state["move_load_until_clock"] = float(self.state["sim_clock"]) + MOVE_LOAD_SECONDS
+    def _set_runtime_activity(self, activity):
+        self._runtime_activity = str(activity or ACTIVITY_NONE)
 
-    def _set_action_window(self, action):
-        bonus, seconds = ACTION_WINDOWS.get(action, (0.0, 0.0))
-        self.state["action_load_bonus"] = float(bonus)
-        self.state["action_load_until_clock"] = float(self.state["sim_clock"]) + float(seconds)
+    def _clear_runtime_activity(self):
+        self._runtime_activity = ACTIVITY_NONE
 
-    def _activity_load(self):
-        clock = float(self.state["sim_clock"])
-        load = 1.0
+    def _activity_multiplier(self):
+        hunger_mult = 1.0
+        hygiene_mult = 1.0
+        fun_mult = 1.0
+        love_mult = 1.0
+
         if self.state["room"] == ROOM_ARCADE:
-            load += ARCADE_ROOM_BONUS
-        if clock < float(self.state["move_load_until_clock"]):
-            load += MOVE_LOAD_BONUS
-        if clock < float(self.state["action_load_until_clock"]):
-            load += float(self.state["action_load_bonus"])
-        return max(1.0, load)
+            hunger_mult *= 1.25
+            hygiene_mult *= 1.20
+
+        if self._runtime_activity == ACTIVITY_HEART_CATCH:
+            hunger_mult *= 1.45
+            hygiene_mult *= 1.35
+            love_mult *= 1.10
+
+        return {
+            "hunger": hunger_mult,
+            "hygiene": hygiene_mult,
+            "fun": fun_mult,
+            "love": love_mult,
+        }
 
     def _finalize_death(self):
         if not self.state["alive"]:
             return
         lowest = {
-            "hunger": float(self.state["hunger"]),
-            "energy": float(self.state["energy"]),
-            "hygiene": float(self.state["hygiene"]),
-            "social": float(self.state["social"]),
             "fun": float(self.state["fun"]),
-            "bladder": float(self.state["bladder"]),
+            "hunger": float(self.state["hunger"]),
+            "hygiene": float(self.state["hygiene"]),
+            "love": float(self.state["love"]),
         }
         reason = min(lowest, key=lowest.get)
         self.state["alive"] = False
         self.state["death_reason"] = reason
-        self._set_last_message("GAME OVER. You did not take care of him. Cause: low %s." % reason)
+        self._set_message("GAME OVER. You did not take care of him.")
 
     def _advance_chunk(self, dt):
         if not self.state["alive"]:
@@ -411,88 +346,57 @@ class PocketRPet:
         if dt <= 0.0:
             return
 
-        self.state["sim_clock"] = float(self.state["sim_clock"]) + dt
+        mult = self._activity_multiplier()
         self.state["age_seconds"] = float(self.state["age_seconds"]) + (dt * AGE_ACCEL)
 
-        load_delta = self._activity_load() - 1.0
-
-        hunger_drop = BASE_DRAINS_PER_HOUR["hunger"] * (1.0 + 0.62 * load_delta) * (dt / 3600.0)
-        energy_drop = BASE_DRAINS_PER_HOUR["energy"] * (1.0 + 0.95 * load_delta) * (dt / 3600.0)
-        hygiene_drop = BASE_DRAINS_PER_HOUR["hygiene"] * (1.0 + 0.40 * load_delta) * (dt / 3600.0)
-        social_drop = BASE_DRAINS_PER_HOUR["social"] * (1.0 + 0.10 * load_delta) * (dt / 3600.0)
-        fun_drop = BASE_DRAINS_PER_HOUR["fun"] * (1.0 + 0.18 * load_delta) * (dt / 3600.0)
-        bladder_drop = BASE_DRAINS_PER_HOUR["bladder"] * (1.0 + 0.74 * load_delta) * (dt / 3600.0)
+        hunger_drop = BASE_DRAINS_PER_HOUR["hunger"] * mult["hunger"] * (dt / 3600.0)
+        hygiene_drop = BASE_DRAINS_PER_HOUR["hygiene"] * mult["hygiene"] * (dt / 3600.0)
+        fun_drop = BASE_DRAINS_PER_HOUR["fun"] * mult["fun"] * (dt / 3600.0)
+        love_drop = BASE_DRAINS_PER_HOUR["love"] * mult["love"] * (dt / 3600.0)
 
         self.state["hunger"] = clamp(float(self.state["hunger"]) - hunger_drop, MIN_STAT, MAX_STAT)
-        self.state["energy"] = clamp(float(self.state["energy"]) - energy_drop, MIN_STAT, MAX_STAT)
         self.state["hygiene"] = clamp(float(self.state["hygiene"]) - hygiene_drop, MIN_STAT, MAX_STAT)
-        self.state["social"] = clamp(float(self.state["social"]) - social_drop, MIN_STAT, MAX_STAT)
         self.state["fun"] = clamp(float(self.state["fun"]) - fun_drop, MIN_STAT, MAX_STAT)
-        self.state["bladder"] = clamp(float(self.state["bladder"]) - bladder_drop, MIN_STAT, MAX_STAT)
-
-        def deficit(value, threshold):
-            if value >= threshold:
-                return 0.0
-            return clamp((threshold - value) / threshold, 0.0, 1.0)
+        self.state["love"] = clamp(float(self.state["love"]) - love_drop, MIN_STAT, MAX_STAT)
 
         stress = 0.0
-        stress += 0.26 * deficit(float(self.state["hunger"]), 30.0)
-        stress += 0.24 * deficit(float(self.state["energy"]), 28.0)
-        stress += 0.18 * deficit(float(self.state["hygiene"]), 26.0)
-        stress += 0.22 * deficit(float(self.state["bladder"]), 24.0)
-        stress += 0.05 * deficit(float(self.state["social"]), 22.0)
-        stress += 0.05 * deficit(float(self.state["fun"]), 22.0)
-        stress += 0.08 * deficit(float(self.state["energy"]), 36.0) * clamp(load_delta, 0.0, 2.0)
+        stress += 0.30 * _deficit(float(self.state["hunger"]), 35.0)
+        stress += 0.27 * _deficit(float(self.state["hygiene"]), 30.0)
+        stress += 0.18 * _deficit(float(self.state["fun"]), 28.0)
+        stress += 0.25 * _deficit(float(self.state["love"]), 28.0)
+
+        wellness_loss_hour = 0.0
+        if stress > 0.12:
+            wellness_loss_hour += (stress - 0.12) * 8.0
 
         critical_count = 0
-        for stat_name in ("hunger", "energy", "hygiene", "bladder"):
+        for stat_name in ("fun", "hunger", "hygiene", "love"):
             if float(self.state[stat_name]) < 15.0:
                 critical_count += 1
-
-        hp_loss_hour = 0.0
-        if stress > 0.15:
-            hp_loss_hour += (stress - 0.15) * 5.6
+                wellness_loss_hour += 3.0
         if critical_count >= 2:
-            hp_loss_hour += (critical_count - 1) * 2.8
-        if critical_count >= 3:
-            hp_loss_hour += 2.2
-        if critical_count >= 4:
-            hp_loss_hour += 1.2
-        if load_delta > 0.0 and float(self.state["energy"]) < 35.0:
-            hp_loss_hour += clamp(load_delta, 0.0, 1.8) * deficit(float(self.state["energy"]), 35.0) * 1.8
+            wellness_loss_hour += 2.0
 
-        hp_regen_hour = 0.0
-        core_min = min(
-            float(self.state["hunger"]),
-            float(self.state["energy"]),
-            float(self.state["hygiene"]),
-            float(self.state["bladder"]),
-        )
-        if core_min > 62.0 and float(self.state["mood"]) > 65.0:
-            hp_regen_hour = 0.75
-        elif core_min > 48.0 and float(self.state["mood"]) > 52.0:
-            hp_regen_hour = 0.22
+        wellness_regen_hour = 0.0
+        if (
+            float(self.state["fun"]) > 65.0
+            and float(self.state["hunger"]) > 65.0
+            and float(self.state["hygiene"]) > 65.0
+            and float(self.state["love"]) > 65.0
+        ):
+            wellness_regen_hour = 0.50
+        elif (
+            float(self.state["fun"]) > 50.0
+            and float(self.state["hunger"]) > 50.0
+            and float(self.state["hygiene"]) > 50.0
+            and float(self.state["love"]) > 50.0
+        ):
+            wellness_regen_hour = 0.15
 
-        health_now = float(self.state["health"]) + ((hp_regen_hour - hp_loss_hour) * (dt / 3600.0))
-        self.state["health"] = clamp(health_now, MIN_STAT, MAX_STAT)
+        new_wellness = float(self.state["wellness"]) + ((wellness_regen_hour - wellness_loss_hour) * (dt / 3600.0))
+        self.state["wellness"] = clamp(new_wellness, MIN_STAT, MAX_STAT)
 
-        mood_target = (
-            float(self.state["health"]) * 0.28
-            + float(self.state["fun"]) * 0.20
-            + float(self.state["social"]) * 0.17
-            + float(self.state["energy"]) * 0.12
-            + float(self.state["hunger"]) * 0.09
-            + float(self.state["hygiene"]) * 0.07
-            + float(self.state["bladder"]) * 0.07
-        )
-        mood_lerp = clamp(dt / 1800.0, 0.0, 1.0)
-        self.state["mood"] = clamp(
-            float(self.state["mood"]) + ((mood_target - float(self.state["mood"])) * mood_lerp),
-            MIN_STAT,
-            MAX_STAT,
-        )
-
-        if float(self.state["health"]) <= 0.0:
+        if float(self.state["wellness"]) <= 0.0:
             self._finalize_death()
 
     def _advance(self, elapsed_s):
@@ -509,35 +413,22 @@ class PocketRPet:
             self._advance_chunk(step)
             remaining -= step
 
-    def _sync_to_now(self, now=None):
-        epoch_now = self._resolve_now(now)
-        last_epoch = _valid_epoch(self.state.get("last_epoch"))
-        if epoch_now is None:
-            return None
-        if last_epoch is not None and epoch_now >= last_epoch:
-            delta = epoch_now - last_epoch
-            if delta > 0.0:
-                self._advance(delta)
-        self.state["last_epoch"] = epoch_now
-        return epoch_now
-
-    def _save_result(self):
-        return self.save()
-
     def new_game(self, now=None):
         self.state = _copy_default_state()
         epoch_now = self._resolve_now(now)
         if epoch_now is not None:
             self.state["last_epoch"] = epoch_now
+        self._clear_runtime_activity()
         return self.snapshot()
 
     def load(self, now=None):
         raw = _read_json(self.save_path)
-        if raw is None:
+        if not _is_v2_state(raw):
             return self.new_game(now=now)
 
         self.state = _merge_state(raw)
-        changed = False
+        self._clear_runtime_activity()
+
         epoch_now = self._resolve_now(now)
         last_epoch = _valid_epoch(self.state.get("last_epoch"))
         if epoch_now is not None and last_epoch is not None and epoch_now >= last_epoch:
@@ -546,20 +437,16 @@ class PocketRPet:
                 delta = MAX_OFFLINE_SECONDS
             if delta > 0.0:
                 self._advance(delta)
-                changed = True
             self.state["last_epoch"] = epoch_now
-        elif epoch_now is not None and last_epoch is None:
+        elif epoch_now is not None:
             self.state["last_epoch"] = epoch_now
-
-        if changed:
-            self.save(now=epoch_now)
         return self.snapshot()
 
     def save(self, now=None):
         epoch_now = self._resolve_now(now)
         if epoch_now is not None:
             self.state["last_epoch"] = epoch_now
-        self.state["version"] = VERSION
+        self.state["version"] = SAVE_VERSION
         return _write_json(self.save_path, self.state)
 
     def tick(self, elapsed_s=None, now=None):
@@ -575,112 +462,149 @@ class PocketRPet:
             self.state["last_epoch"] = epoch_now
         return self.snapshot()
 
-    def available_actions(self):
-        if not self.state["alive"]:
-            return []
-        room = self.state["room"]
-        info = ROOMS.get(room, ROOMS[ROOM_HALL])
-        return list(info["actions"])
-
-    def _result(self, ok, message, lines=None):
-        if lines is None:
-            lines = []
-        return {
-            "ok": bool(ok),
-            "message": str(message),
-            "lines": list(lines),
-            "state": self.snapshot(),
-        }
-
-    def move(self, direction):
-        self._sync_to_now()
+    def go_room(self, room, now=None):
+        self.tick(now=now)
         if not self.state["alive"]:
             return self._result(False, "He is gone. Restart to try again.")
 
-        direction = str(direction or "").upper()
-        room = self.state["room"]
-        info = ROOMS.get(room, ROOMS[ROOM_HALL])
-        next_room = info["neighbors"].get(direction)
-        if not next_room:
-            self._set_last_message("No room in that direction.")
-            self._save_result()
-            return self._result(False, "No room in that direction.")
+        room = str(room or "").upper()
+        current = self.state["room"]
+        if room not in ROOMS:
+            return self._result(False, "That room does not exist.")
+        if room == current:
+            return self._result(True, "He is already there.")
+        if room not in ROOM_GRAPH.get(current, ()):
+            return self._result(False, "You cannot go there from here.")
 
-        self.state["room"] = next_room
+        self.state["room"] = room
         self._boost(MOVE_COSTS)
-        self._set_move_window()
-        self._set_last_message("He moved into the %s." % next_room.title())
-        if float(self.state["health"]) <= 0.0:
-            self._finalize_death()
-        self._save_result()
+        self._set_message("He moved to the %s." % ROOMS[room]["name"])
+        self.save(now=now)
         return self._result(True, self.state["last_message"])
 
-    def do_action(self, action):
-        self._sync_to_now()
+    def feed(self, now=None):
+        self.tick(now=now)
         if not self.state["alive"]:
             return self._result(False, "He is gone. Restart to try again.")
 
-        action = str(action or "")
-        if action not in self.available_actions():
-            return self._result(False, "That action is not available here.")
+        hunger_now = float(self.state["hunger"])
+        if hunger_now <= 65.0:
+            self._boost({"hunger": 20, "love": 1, "hygiene": -1})
+            message = "He ate happily."
+        elif hunger_now <= 85.0:
+            self._boost({"hunger": 10, "hygiene": -1})
+            message = "Quick snack done."
+        else:
+            self._boost({"hunger": 2, "hygiene": -3, "fun": -1})
+            message = "He is already full."
 
-        effects = ACTION_EFFECTS.get(action, {})
-        self._boost(effects)
-        self._set_action_window(action)
+        self.state["feed_count"] = int(self.state["feed_count"]) + 1
+        self._set_message(message)
+        self.save(now=now)
+        return self._result(True, message)
 
-        if action == "Cuddle":
-            self.state["cuddles_shared"] = int(self.state["cuddles_shared"]) + 1
-        elif action == "Give Hug":
-            self.state["hugs_given"] = int(self.state["hugs_given"]) + 1
-        elif action in ("Light Snack", "Balanced Meal", "Sweet Treat"):
-            self.state["snacks_given"] = int(self.state["snacks_given"]) + 1
-        elif action == "Talk":
-            self.state["talk_sessions"] = int(self.state["talk_sessions"]) + 1
-        elif action == "Arcade Session":
-            self.state["arcade_sessions"] = int(self.state["arcade_sessions"]) + 1
+    def interact(self, now=None):
+        self.tick(now=now)
+        if not self.state["alive"]:
+            return self._result(False, "He is gone. Restart to try again.")
 
-        if action == "Talk":
+        room = self.state["room"]
+        if room == ROOM_MAIN:
             idx = int(self.state["talk_index"]) % len(TALK_PAIRS)
-            self.state["talk_index"] = int(self.state["talk_index"]) + 1
             pair = TALK_PAIRS[idx]
-            self._set_last_message(pair[1])
-            self._save_result()
+            self.state["talk_index"] = int(self.state["talk_index"]) + 1
+            self.state["talk_count"] = int(self.state["talk_count"]) + 1
+            self._boost({"love": 4, "fun": 1})
+            self._set_message(pair[1])
+            self.save(now=now)
             return self._result(True, pair[1], lines=[pair[0], pair[1]])
 
-        self._set_last_message(ACTION_MESSAGES.get(action, "He responded to that action."))
-        if float(self.state["health"]) <= 0.0:
-            self._finalize_death()
-        self._save_result()
-        return self._result(True, self.state["last_message"])
+        if room == ROOM_BATHROOM:
+            self.state["clean_count"] = int(self.state["clean_count"]) + 1
+            self._boost({"hygiene": 24, "love": 1, "fun": -1})
+            lines = ["You helped him get cleaned up.", "He feels fresh again."]
+            self._set_message(lines[-1])
+            self.save(now=now)
+            return self._result(True, lines[-1], lines=lines)
+
+        if room == ROOM_BEDROOM:
+            self.state["love_count"] = int(self.state["love_count"]) + 1
+            self._boost({"love": 8, "fun": 2})
+            lines = ["You got close with him for a while.", "He feels extra loved."]
+            self._set_message(lines[-1])
+            self.save(now=now)
+            return self._result(True, lines[-1], lines=lines)
+
+        if room == ROOM_ARCADE:
+            return self._result(True, "Arcade menu ready.", open_menu="ARCADE")
+
+        return self._result(False, "Nothing happens.")
+
+    def apply_arcade_result(self, game_name, score, now=None):
+        self.tick(now=now)
+        if not self.state["alive"]:
+            return self._result(False, "He is gone. Restart to try again.")
+
+        if str(game_name or "").upper() != ACTIVITY_HEART_CATCH:
+            return self._result(False, "Unknown arcade game.")
+
+        reward = heart_catch_reward(score)
+        self._boost({
+            "fun": reward["fun_gain"],
+            "love": reward["love_gain"],
+            "hunger": -reward["hunger_loss"],
+            "hygiene": -reward["hygiene_loss"],
+        })
+        self.state["arcade_sessions"] = int(self.state["arcade_sessions"]) + 1
+        best = int(self.state["heart_catch_best"])
+        score = int(score)
+        if score > best:
+            self.state["heart_catch_best"] = score
+        message = "Heart Catcher score %d. Fun +%d Love +%d." % (
+            score,
+            reward["fun_gain"],
+            reward["love_gain"],
+        )
+        self._set_message(message)
+        self.save(now=now)
+        result = self._result(True, message)
+        result["reward"] = reward
+        return result
 
     def snapshot(self):
-        out = {
+        return {
             "room": self.state["room"],
             "alive": bool(self.state["alive"]),
             "death_reason": self.state["death_reason"],
             "age_seconds": float(self.state["age_seconds"]),
-            "age_label": _age_label(self.state["age_seconds"]),
-            "health": round(float(self.state["health"]), 2),
-            "hunger": round(float(self.state["hunger"]), 2),
-            "energy": round(float(self.state["energy"]), 2),
-            "hygiene": round(float(self.state["hygiene"]), 2),
-            "social": round(float(self.state["social"]), 2),
-            "fun": round(float(self.state["fun"]), 2),
-            "bladder": round(float(self.state["bladder"]), 2),
-            "mood": round(float(self.state["mood"]), 2),
-            "mood_word": _mood_word(self.state),
-            "available_actions": self.available_actions(),
-            "hugs_given": int(self.state["hugs_given"]),
-            "cuddles_shared": int(self.state["cuddles_shared"]),
-            "talk_sessions": int(self.state["talk_sessions"]),
+            "day_label": _day_label(self.state["age_seconds"]),
+            "wellness": round(float(self.state["wellness"]), 2),
+            "fun": round(float(self.state["fun"]), 1),
+            "hunger": round(float(self.state["hunger"]), 1),
+            "hygiene": round(float(self.state["hygiene"]), 1),
+            "love": round(float(self.state["love"]), 1),
+            "talk_index": int(self.state["talk_index"]),
+            "feed_count": int(self.state["feed_count"]),
+            "talk_count": int(self.state["talk_count"]),
+            "clean_count": int(self.state["clean_count"]),
+            "love_count": int(self.state["love_count"]),
             "arcade_sessions": int(self.state["arcade_sessions"]),
-            "snacks_given": int(self.state["snacks_given"]),
+            "heart_catch_best": int(self.state["heart_catch_best"]),
             "last_message": self.state["last_message"],
-            "activity_load": round(self._activity_load(), 3),
         }
-        return out
 
     def restart(self, now=None):
         self.new_game(now=now)
         self.save(now=now)
         return self.snapshot()
+
+    def _result(self, ok, message, lines=None, open_menu=None):
+        out = {
+            "ok": bool(ok),
+            "message": str(message),
+            "lines": list(lines or []),
+            "state": self.snapshot(),
+        }
+        if open_menu is not None:
+            out["open_menu"] = str(open_menu)
+        return out
